@@ -24,10 +24,7 @@ use tracing::{instrument, Span};
 
 use super::fpu::{FP_CONTROL_WORD_DEFAULT, FP_TAG_WORD_DEFAULT, MXCSR_DEFAULT};
 use super::handlers::{MemAccessHandlerWrapper, OutBHandlerWrapper};
-use super::{
-    HyperlightExit, Hypervisor, VirtualCPU, CR0_AM, CR0_ET, CR0_MP, CR0_NE, CR0_PE, CR0_PG, CR0_WP,
-    CR4_OSFXSR, CR4_OSXMMEXCPT, CR4_PAE, EFER_LMA, EFER_LME, EFER_NX, EFER_SCE,
-};
+use super::{HyperlightExit, Hypervisor, VirtualCPU};
 use crate::hypervisor::hypervisor_handler::HypervisorHandler;
 use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
 use crate::mem::ptr::{GuestPtr, RawPtr};
@@ -116,7 +113,7 @@ impl KVMDriver {
     }
 
     #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
-    fn setup_initial_sregs(vcpu_fd: &mut VcpuFd, pml4_addr: u64) -> Result<()> {
+    fn setup_initial_sregs(vcpu_fd: &mut VcpuFd, _pml4_addr: u64) -> Result<()> {
         // setup paging and IA-32e (64-bit) mode
         let mut sregs = vcpu_fd.get_sregs()?;
         sregs.cs.base = 0;
@@ -168,6 +165,11 @@ impl Hypervisor for KVMDriver {
         let regs = kvm_regs {
             rip: self.entrypoint,
             rsp: self.orig_rsp.absolute()?,
+
+            // Kernel flags
+            rax: 0x0c00ffee, // TODO: Magic Value for Hyperlight Bootloader
+            rbx: 0,          // TODO: Initrd location
+            rflags: 2,       // Always set to 2
 
             // function args
             rcx: peb_addr.into(),

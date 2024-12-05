@@ -44,18 +44,7 @@ use crate::error::HyperlightError::{
 };
 use crate::error::HyperlightHostError;
 use crate::sandbox::SandboxConfiguration;
-use crate::{log_then_return, new_error, HyperlightError, Result};
-
-/// Paging Flags
-///
-/// See the following links explaining paging, also see paging-development-notes.md in docs:
-///
-/// * Very basic description: https://stackoverflow.com/a/26945892
-/// * More in-depth descriptions: https://wiki.osdev.org/Paging
-const PAGE_PRESENT: u64 = 1; // Page is Present
-const PAGE_RW: u64 = 1 << 1; // Page is Read/Write (if not set page is read only so long as the WP bit in CR0 is set to 1 - which it is in Hyperlight)
-const PAGE_USER: u64 = 1 << 2; // User/Supervisor (if this bit is set then the page is accessible by user mode code)
-const PAGE_NX: u64 = 1 << 63; // Execute Disable (if this bit is set then data in the page cannot be executed)
+use crate::{log_then_return, new_error, Result};
 
 // The amount of memory that can be mapped per page table
 pub(super) const AMOUNT_OF_MEMORY_PER_PT: usize = 0x200000;
@@ -122,122 +111,6 @@ where
     /// Get `SharedMemory` in `self` as a mutable reference
     pub(crate) fn get_shared_mem_mut(&mut self) -> &mut S {
         &mut self.shared_mem
-    }
-
-    /// Set up the hypervisor partition in the given `SharedMemory` parameter
-    /// `shared_mem`, with the given memory size `mem_size`
-    // TODO: This should perhaps happen earlier and use an
-    // ExclusiveSharedMemory from the beginning.
-    #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
-    pub(crate) fn set_up_shared_memory(
-        &mut self,
-        mem_size: u64,
-        regions: &mut [MemoryRegion],
-    ) -> Result<u64> {
-        // Add 0x200000 because that's the start of mapped memory
-        // For MSVC, move rsp down by 0x28.  This gives the called 'main'
-        // function the appearance that rsp was 16 byte aligned before
-        // the 'call' that calls main (note we don't really have a return value
-        // on the stack but some assembly instructions are expecting rsp have
-        // started 0x8 bytes off of 16 byte alignment when 'main' is invoked.
-        // We do 0x28 instead of 0x8 because MSVC can expect that there are
-        // 0x20 bytes of space to write to by the called function.
-        // I am not sure if this happens with the 'main' method, but we do this
-        // just in case.
-        //
-        // NOTE: We do this also for GCC freestanding binaries because we
-        // specify __attribute__((ms_abi)) on the start method
-        let rsp: u64 = self.layout.get_top_of_user_stack_offset() as u64
-            + SandboxMemoryLayout::BASE_ADDRESS as u64
-            + self.layout.stack_size as u64
-            - 0x28;
-
-        self.shared_mem.with_exclusivity(|shared_mem| {
-            // Create PDL4 table with only 1 PML4E
-            shared_mem.write_u64(
-                SandboxMemoryLayout::PML4_OFFSET,
-                SandboxMemoryLayout::PDPT_GUEST_ADDRESS as u64 | PAGE_PRESENT | PAGE_RW,
-            )?;
-
-            // Create PDPT with only 1 PDPTE
-            shared_mem.write_u64(
-                SandboxMemoryLayout::PDPT_OFFSET,
-                SandboxMemoryLayout::PD_GUEST_ADDRESS as u64 | PAGE_PRESENT | PAGE_RW,
-            )?;
-
-            for i in 0..512 {
-                let offset = SandboxMemoryLayout::PD_OFFSET + (i * 8);
-                let val_to_write: u64 = (SandboxMemoryLayout::PT_GUEST_ADDRESS as u64
-                    + (i * 4096) as u64)
-                    | PAGE_PRESENT
-                    | PAGE_RW;
-                shared_mem.write_u64(offset, val_to_write)?;
-            }
-
-            // We only need to create enough PTEs to map the amount of memory we have
-            // We need one PT for every 2MB of memory that is mapped
-            // We can use the memory size to calculate the number of PTs we need
-            // We round up mem_size/2MB and then we need to add 1 as we start our memory mapping at 0x200000
-
-            let mem_size = usize::try_from(mem_size)?;
-
-            let num_pages: usize =
-                ((mem_size + AMOUNT_OF_MEMORY_PER_PT - 1) / AMOUNT_OF_MEMORY_PER_PT) + 1;
-
-            // Create num_pages PT with 512 PTEs
-            for p in 0..num_pages {
-                for i in 0..512 {
-                    let offset = SandboxMemoryLayout::PT_OFFSET + (p * 4096) + (i * 8);
-                    // Each PTE maps a 4KB page
-                    let val_to_write = if p == 0 {
-                        (p << 21) as u64 | (i << 12) as u64
-                    } else {
-                        let flags = match Self::get_page_flags(p, i, regions) {
-                            Ok(region_type) => match region_type {
-                                // TODO: We parse and load the exe according to its sections and then
-                                // have the correct flags set rather than just marking the entire binary as executable
-                                MemoryRegionType::Code => PAGE_PRESENT | PAGE_RW | PAGE_USER,
-                                MemoryRegionType::Stack => {
-                                    PAGE_PRESENT | PAGE_RW | PAGE_USER | PAGE_NX
-                                }
-                                #[cfg(feature = "executable_heap")]
-                                MemoryRegionType::Heap => PAGE_PRESENT | PAGE_RW | PAGE_USER,
-                                #[cfg(not(feature = "executable_heap"))]
-                                MemoryRegionType::Heap => {
-                                    PAGE_PRESENT | PAGE_RW | PAGE_USER | PAGE_NX
-                                }
-                                // The guard page is marked RW and User so that if it gets written to we can detect it in the host
-                                // If/When we implement an interrupt handler for page faults in the guest then we can remove this access and handle things properly there
-                                MemoryRegionType::GuardPage => {
-                                    PAGE_PRESENT | PAGE_RW | PAGE_USER | PAGE_NX
-                                }
-                                MemoryRegionType::InputData => PAGE_PRESENT | PAGE_RW | PAGE_NX,
-                                MemoryRegionType::OutputData => PAGE_PRESENT | PAGE_RW | PAGE_NX,
-                                MemoryRegionType::Peb => PAGE_PRESENT | PAGE_RW | PAGE_NX,
-                                // Host Function Definitions are readonly in the guest
-                                MemoryRegionType::HostFunctionDefinitions => PAGE_PRESENT | PAGE_NX,
-                                MemoryRegionType::PanicContext => PAGE_PRESENT | PAGE_RW | PAGE_NX,
-                                MemoryRegionType::GuestErrorData => {
-                                    PAGE_PRESENT | PAGE_RW | PAGE_NX
-                                }
-                                // Host Exception Data are readonly in the guest
-                                MemoryRegionType::HostExceptionData => PAGE_PRESENT | PAGE_NX,
-                                MemoryRegionType::PageTables => PAGE_PRESENT | PAGE_RW | PAGE_NX,
-                                MemoryRegionType::KernelStack => PAGE_PRESENT | PAGE_RW | PAGE_NX,
-                                MemoryRegionType::BootStack => PAGE_PRESENT | PAGE_RW | PAGE_NX,
-                            },
-                            // If there is an error then the address isn't mapped so mark it as not present
-                            Err(_) => 0,
-                        };
-                        ((p << 21) as u64 | (i << 12) as u64) | flags
-                    };
-                    shared_mem.write_u64(offset, val_to_write)?;
-                }
-            }
-            Ok::<(), HyperlightError>(())
-        })??;
-
-        Ok(rsp)
     }
 
     fn get_page_flags(

@@ -43,7 +43,7 @@ use crate::mem::layout::SandboxMemoryLayout;
 use crate::mem::mgr::SandboxMemoryManager;
 use crate::mem::ptr::{GuestPtr, RawPtr};
 use crate::mem::ptr_offset::Offset;
-use crate::mem::shared_mem::{GuestSharedMemory, HostSharedMemory, SharedMemory};
+use crate::mem::shared_mem::{GuestSharedMemory, HostSharedMemory};
 use crate::sandbox::hypervisor::{get_available_hypervisor, HypervisorType};
 #[cfg(feature = "function_call_metrics")]
 use crate::sandbox::metrics::SandboxMetric::GuestFunctionCallDurationMicroseconds;
@@ -788,10 +788,9 @@ fn set_up_hypervisor_partition(
     #[allow(unused_variables)] // parameter only used for in-process mode
     outb_handler: OutBHandlerWrapper,
 ) -> Result<Box<dyn Hypervisor>> {
-    let mem_size = u64::try_from(mgr.shared_mem.mem_size())?;
-    let mut regions = mgr.layout.get_memory_regions(&mgr.shared_mem)?;
+    let regions = mgr.layout.get_memory_regions(&mgr.shared_mem)?;
     let rsp_ptr = {
-        let rsp_u64 = mgr.set_up_shared_memory(mem_size, &mut regions)?;
+        let rsp_u64 = 0;
         let rsp_raw = RawPtr::from(rsp_u64);
         GuestPtr::try_from(rsp_raw)
     }?;
