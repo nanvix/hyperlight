@@ -119,11 +119,8 @@ impl KVMDriver {
     fn setup_initial_sregs(vcpu_fd: &mut VcpuFd, pml4_addr: u64) -> Result<()> {
         // setup paging and IA-32e (64-bit) mode
         let mut sregs = vcpu_fd.get_sregs()?;
-        sregs.cr3 = pml4_addr;
-        sregs.cr4 = CR4_PAE | CR4_OSFXSR | CR4_OSXMMEXCPT;
-        sregs.cr0 = CR0_PE | CR0_MP | CR0_ET | CR0_NE | CR0_AM | CR0_PG | CR0_WP;
-        sregs.efer = EFER_LME | EFER_LMA | EFER_SCE | EFER_NX;
-        sregs.cs.l = 1; // required for 64-bit mode
+        sregs.cs.base = 0;
+        sregs.cs.selector = 0;
         vcpu_fd.set_sregs(&sregs)?;
         Ok(())
     }
