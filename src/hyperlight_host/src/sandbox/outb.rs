@@ -34,6 +34,7 @@ pub(super) enum OutBAction {
     Log,
     CallFunction,
     Abort,
+    Magic,
 }
 
 impl TryFrom<u16> for OutBAction {
@@ -44,6 +45,7 @@ impl TryFrom<u16> for OutBAction {
             99 => Ok(OutBAction::Log),
             101 => Ok(OutBAction::CallFunction),
             102 => Ok(OutBAction::Abort),
+            103 => Ok(OutBAction::Magic),
             _ => Err(new_error!("Invalid OutB value: {}", val)),
         }
     }
@@ -152,6 +154,17 @@ fn handle_outb_impl(
                     s.trim().to_string(),
                 )),
             }
+        }
+        OutBAction::Magic => {
+            let ch: char = match char::from_u32(byte as u32) {
+                Some(c) => c,
+                None => {
+                    return Err(new_error!("Invalid character for logging: {}", byte));
+                }
+            };
+
+            eprint!("{}", ch);
+            Ok(())
         }
     }
 }
