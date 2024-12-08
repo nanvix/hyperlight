@@ -26,6 +26,7 @@ use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     let u_sbox = UninitializedSandbox::new(
+        None,
         GuestBinary::FilePath(simple_guest_as_string().expect("Guest Binary Missing")),
         None,
         None,

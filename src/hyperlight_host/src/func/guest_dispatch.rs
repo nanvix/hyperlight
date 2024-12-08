@@ -157,6 +157,7 @@ mod tests {
             let make_get_pid_syscall_func = Arc::new(Mutex::new(make_get_pid_syscall));
 
             let mut usbox = UninitializedSandbox::new(
+                None,
                 GuestBinary::FilePath(simple_guest_as_string().expect("Guest Binary Missing")),
                 None,
                 None,
@@ -225,6 +226,7 @@ mod tests {
     fn test_execute_in_host() {
         let uninitialized_sandbox = || {
             UninitializedSandbox::new(
+                None,
                 GuestBinary::FilePath(simple_guest_as_string().expect("Guest Binary Missing")),
                 None,
                 None,
@@ -338,6 +340,7 @@ mod tests {
     fn call_guest_function_by_name_hv() {
         // in-hypervisor mode
         let u_sbox = UninitializedSandbox::new(
+            None,
             guest_bin(),
             // for now, we're using defaults. In the future, we should get
             // variability below
@@ -392,6 +395,7 @@ mod tests {
             return Ok(());
         }
         let usbox = UninitializedSandbox::new(
+            None,
             GuestBinary::FilePath(simple_guest_as_string().expect("Guest Binary Missing")),
             None,
             None,
@@ -441,6 +445,7 @@ mod tests {
             return;
         }
         let mut usbox = UninitializedSandbox::new(
+            None,
             GuestBinary::FilePath(callback_guest_as_string().expect("Guest Binary Missing")),
             None,
             None,

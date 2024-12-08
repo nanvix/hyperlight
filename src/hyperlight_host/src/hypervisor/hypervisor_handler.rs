@@ -863,6 +863,8 @@ fn set_up_hypervisor_partition(
                     regions,
                     pml4_ptr.absolute()?,
                     entrypoint_ptr.absolute()?,
+                    mgr.initrd_addr.clone().into(),
+                    mgr.initrd_size,
                     rsp_ptr.absolute()?,
                 )?;
                 Ok(Box::new(hv))
@@ -910,6 +912,7 @@ mod tests {
             panic!("Panic on create_multi_use_sandbox because no hypervisor is present");
         }
         let usbox = UninitializedSandbox::new(
+            None,
             GuestBinary::FilePath(simple_guest_as_string().expect("Guest Binary Missing")),
             None,
             None,

@@ -212,6 +212,7 @@ mod tests {
         for i in 0..10 {
             let simple_guest_path = simple_guest_as_string().expect("Guest Binary Missing");
             let unintializedsandbox = UninitializedSandbox::new(
+                None,
                 GuestBinary::FilePath(simple_guest_path),
                 None,
                 None,

@@ -38,9 +38,11 @@ fn main() -> Result<()> {
 
     let mut config: SandboxConfiguration = SandboxConfiguration::default();
     config.set_heap_size(4 * 1024 * 1024);
+    config.set_stack_size(4 * 1024);
 
     // Create an uninitialized sandbox with a guest binary
     let sandbox = UninitializedSandbox::new(
+        None,
         GuestBinary::FilePath(guest_binary_path.to_string()),
         Some(config),
         None, // Use default run options.

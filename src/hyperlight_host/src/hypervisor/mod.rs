@@ -14,6 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+#![allow(unused)]
+
 use tracing::{instrument, Span};
 
 use crate::error::HyperlightError::ExecutionCanceledByHost;
@@ -298,8 +300,13 @@ pub(crate) mod tests {
             ));
         }
 
-        let sandbox =
-            UninitializedSandbox::new(GuestBinary::FilePath(filename.clone()), None, None, None)?;
+        let sandbox = UninitializedSandbox::new(
+            None,
+            GuestBinary::FilePath(filename.clone()),
+            None,
+            None,
+            None,
+        )?;
         let (hshm, gshm) = sandbox.mgr.build();
         drop(hshm);
 

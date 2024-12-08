@@ -44,7 +44,7 @@ pub struct MultiUseGuestCallContext {
 impl MultiUseGuestCallContext {
     /// Take ownership  of a `MultiUseSandbox` and
     /// return a new `MultiUseGuestCallContext` instance.
-    ///     
+    ///
     #[instrument(skip_all, parent = Span::current())]
     pub fn start(sbox: MultiUseSandbox) -> Self {
         Self { sbox }
@@ -110,7 +110,7 @@ pub struct SingleUseGuestCallContext {
 impl SingleUseGuestCallContext {
     /// Take ownership  of a `SingleUseSandbox` and
     /// return a new `SingleUseGuestCallContext` instance.
-    ///     
+    ///
     #[instrument(skip_all, parent = Span::current())]
     pub(crate) fn start(sbox: SingleUseSandbox) -> Self {
         Self { sbox }
@@ -215,7 +215,7 @@ mod tests {
         let path = simple_guest_as_string().map_err(|e| {
             HyperlightError::Error(format!("failed to get simple guest path ({e:?})"))
         })?;
-        UninitializedSandbox::new(GuestBinary::FilePath(path), None, None, None)
+        UninitializedSandbox::new(None, GuestBinary::FilePath(path), None, None, None)
     }
 
     /// Test to create a `SingleUseSandbox`, then call several guest

@@ -67,6 +67,8 @@ pub(crate) struct SandboxMemoryManager<S> {
     pub(crate) load_addr: RawPtr,
     /// Offset for the execution entrypoint from `load_addr`
     pub(crate) entrypoint_offset: Offset,
+    pub(crate) initrd_addr: RawPtr,
+    pub(crate) initrd_size: usize,
     /// A vector of memory snapshots that can be used to save and  restore the state of the memory
     /// This is used by the Rust Sandbox implementation (rather than the mem_snapshot field above which only exists to support current C API)
     snapshots: Arc<Mutex<Vec<SharedMemorySnapshot>>>,
@@ -96,6 +98,8 @@ where
             shared_mem,
             inprocess,
             load_addr,
+            initrd_addr: RawPtr::from(0),
+            initrd_size: 0,
             entrypoint_offset,
             snapshots: Arc::new(Mutex::new(Vec::new())),
             #[cfg(target_os = "windows")]
@@ -403,6 +407,8 @@ impl SandboxMemoryManager<ExclusiveSharedMemory> {
                 layout: self.layout,
                 inprocess: self.inprocess,
                 load_addr: self.load_addr.clone(),
+                initrd_addr: self.initrd_addr.clone(),
+                initrd_size: self.initrd_size,
                 entrypoint_offset: self.entrypoint_offset,
                 snapshots: Arc::new(Mutex::new(Vec::new())),
                 #[cfg(target_os = "windows")]
@@ -413,6 +419,8 @@ impl SandboxMemoryManager<ExclusiveSharedMemory> {
                 layout: self.layout,
                 inprocess: self.inprocess,
                 load_addr: self.load_addr.clone(),
+                initrd_addr: self.initrd_addr.clone(),
+                initrd_size: self.initrd_size,
                 entrypoint_offset: self.entrypoint_offset,
                 snapshots: Arc::new(Mutex::new(Vec::new())),
                 #[cfg(target_os = "windows")]

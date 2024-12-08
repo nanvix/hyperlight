@@ -157,6 +157,7 @@ pub(crate) struct SandboxMemoryLayout {
     #[allow(dead_code)]
     pub(super) kernel_stack_size_rounded: usize,
     boot_stack_buffer_offset: usize,
+    user_memory_offset: usize,
 
     // other
     pub(crate) peb_address: usize,
@@ -283,6 +284,10 @@ impl Debug for SandboxMemoryLayout {
                 "Boot Stack Buffer Offset",
                 &format_args!("{:#x}", self.boot_stack_buffer_offset),
             )
+            .field(
+                "User Memory Offset",
+                &format_args!("{:#x}", self.user_memory_offset),
+            )
             .finish()
     }
 }
@@ -385,6 +390,7 @@ impl SandboxMemoryLayout {
         // make sure guard page starts at 4K boundary
         let guard_page_offset = round_up_to(guest_heap_buffer_offset + heap_size, PAGE_SIZE_USIZE);
         let guest_user_stack_buffer_offset = guard_page_offset + PAGE_SIZE_USIZE;
+        log::debug!("=======> stack size: {:#x}", stack_size);
         // round up stack size to page size. This is needed for MemoryRegion
         let stack_size_rounded = round_up_to(stack_size, PAGE_SIZE_USIZE);
 
@@ -393,6 +399,7 @@ impl SandboxMemoryLayout {
         let kernel_stack_size_rounded = round_up_to(cfg.get_kernel_stack_size(), PAGE_SIZE_USIZE);
         let kernel_stack_guard_page_offset = kernel_stack_buffer_offset + kernel_stack_size_rounded;
         let boot_stack_buffer_offset = kernel_stack_guard_page_offset + PAGE_SIZE_USIZE;
+        let user_memory_offset = boot_stack_buffer_offset + PAGE_SIZE_USIZE;
 
         Ok(Self {
             peb_offset,
@@ -429,6 +436,7 @@ impl SandboxMemoryLayout {
             kernel_stack_guard_page_offset,
             kernel_stack_size_rounded,
             boot_stack_buffer_offset,
+            user_memory_offset,
         })
     }
 
@@ -648,7 +656,7 @@ impl SandboxMemoryLayout {
     /// layout.
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     fn get_unaligned_memory_size(&self) -> usize {
-        self.get_boot_stack_buffer_offset() + PAGE_SIZE_USIZE
+        Self::MAX_MEMORY_SIZE
     }
 
     /// get the code offset
@@ -690,6 +698,13 @@ impl SandboxMemoryLayout {
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub(super) fn get_boot_stack_buffer_offset(&self) -> usize {
         self.boot_stack_buffer_offset
+    }
+
+    /// Get the offset in guest memory to the user memory
+    /// This is the offset in the sandbox memory where the user memory starts
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
+    pub(super) fn get_user_memory_offset(&self) -> usize {
+        self.user_memory_offset
     }
 
     #[cfg(test)]
@@ -1039,10 +1054,29 @@ impl SandboxMemoryLayout {
             ));
         }
 
-        let final_offset = builder.push_page_aligned(
+        let user_memory_offset = builder.push_page_aligned(
             PAGE_SIZE_USIZE,
             MemoryRegionFlags::READ | MemoryRegionFlags::WRITE,
             BootStack,
+        );
+
+        let expected_user_memory_offset = TryInto::<usize>::try_into(self.user_memory_offset)?;
+
+        if user_memory_offset != expected_user_memory_offset {
+            return Err(new_error!(
+                "User Memory offset does not match expected User Memory offset expected:  {}, actual:  {}",
+                expected_user_memory_offset,
+                user_memory_offset
+            ));
+        }
+
+        // TODO: we should get this size from SandboxConfiguration.
+        let user_region_size = Self::MAX_MEMORY_SIZE - user_memory_offset;
+
+        let final_offset = builder.push_page_aligned(
+            user_region_size,
+            MemoryRegionFlags::READ | MemoryRegionFlags::WRITE | MemoryRegionFlags::EXECUTE,
+            Code,
         );
 
         let expected_final_offset = TryInto::<usize>::try_into(self.get_memory_size()?)?;
@@ -1051,10 +1085,9 @@ impl SandboxMemoryLayout {
             return Err(new_error!(
                 "Final offset does not match expected Final offset expected:  {}, actual:  {}",
                 expected_final_offset,
-                final_offset
+                user_memory_offset
             ));
         }
-
         Ok(builder.build())
     }
 
@@ -1247,6 +1280,16 @@ impl SandboxMemoryLayout {
         )?;
 
         Ok(())
+    }
+
+    #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
+    pub(crate) fn write_user_memory(
+        &self,
+        shared_mem: &mut ExclusiveSharedMemory,
+        bytes: &[u8],
+    ) -> Result<(u64, usize)> {
+        shared_mem.copy_from_slice(bytes, self.user_memory_offset)?;
+        Ok((self.user_memory_offset as u64, bytes.len()))
     }
 }
 

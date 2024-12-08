@@ -127,6 +127,7 @@ fn run_example(wait_input: bool) -> HyperlightResult<()> {
 
                 // Create a new sandbox.
                 let usandbox = UninitializedSandbox::new(
+                    None,
                     GuestBinary::FilePath(path.clone()),
                     None,
                     None,

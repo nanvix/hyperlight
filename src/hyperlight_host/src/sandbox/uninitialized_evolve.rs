@@ -164,6 +164,7 @@ mod tests {
         ];
         for guest_bin_path in guest_bin_paths {
             let u_sbox = UninitializedSandbox::new(
+                None,
                 GuestBinary::FilePath(guest_bin_path.clone()),
                 None,
                 None,

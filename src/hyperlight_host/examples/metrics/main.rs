@@ -50,6 +50,7 @@ fn main() -> Result<()> {
         let handle = spawn(move || -> Result<()> {
             // Create a new sandbox.
             let usandbox = UninitializedSandbox::new(
+                None,
                 GuestBinary::FilePath(path),
                 None,
                 None,
@@ -93,6 +94,7 @@ fn main() -> Result<()> {
 
     // Create a new sandbox.
     let usandbox = UninitializedSandbox::new(
+        None,
         GuestBinary::FilePath(hyperlight_guest_path.clone()),
         None,
         None,

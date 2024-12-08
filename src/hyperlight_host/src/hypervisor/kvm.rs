@@ -58,6 +58,8 @@ pub(super) struct KVMDriver {
     _vm_fd: VmFd,
     vcpu_fd: VcpuFd,
     entrypoint: u64,
+    initrd_addr: u64,
+    initrd_size: usize,
     orig_rsp: GuestPtr,
     mem_regions: Vec<MemoryRegion>,
 }
@@ -71,6 +73,8 @@ impl KVMDriver {
         mem_regions: Vec<MemoryRegion>,
         pml4_addr: u64,
         entrypoint: u64,
+        initrd_addr: u64,
+        initrd_size: usize,
         rsp: u64,
     ) -> Result<Self> {
         if !is_hypervisor_present() {
@@ -95,6 +99,8 @@ impl KVMDriver {
                     _ => 0, // normal, RWX
                 },
             };
+            log::debug!("Setting memory region: {:#x?}", kvm_region);
+            log::debug!("Setting memory region: {:#x?}", region);
             unsafe { vm_fd.set_user_memory_region(kvm_region) }
         })?;
 
@@ -107,6 +113,8 @@ impl KVMDriver {
             _vm_fd: vm_fd,
             vcpu_fd,
             entrypoint,
+            initrd_addr,
+            initrd_size,
             orig_rsp: rsp_gp,
             mem_regions,
         })
@@ -162,13 +170,19 @@ impl Hypervisor for KVMDriver {
         mem_access_hdl: MemAccessHandlerWrapper,
         hv_handler: Option<HypervisorHandler>,
     ) -> Result<()> {
+        // Encode initrd location and size:
+        // - Lower 12 bits encode the size in 4KB pages
+        // - Higher bits encode the base address
+        let (initrd_base, initrd_size): (u64, u64) = (self.initrd_addr, self.initrd_size as u64);
+        let rbx: u64 = (initrd_base & 0xfffff000) | ((initrd_size >> 12) & 0xfff);
+
         let regs = kvm_regs {
             rip: self.entrypoint,
             rsp: self.orig_rsp.absolute()?,
 
             // Kernel flags
             rax: 0x0c00ffee, // TODO: Magic Value for Hyperlight Bootloader
-            rbx: 0,          // TODO: Initrd location
+            rbx,             // TODO: Initrd location
             rflags: 2,       // Always set to 2
 
             // function args
@@ -180,6 +194,7 @@ impl Hypervisor for KVMDriver {
             ..Default::default()
         };
         self.vcpu_fd.set_regs(&regs)?;
+        log::debug!("Initialised VCPU with registers: {:#x?}", regs);
 
         VirtualCPU::run(
             self.as_mut_hypervisor(),
@@ -275,12 +290,16 @@ impl Hypervisor for KVMDriver {
             }
             Ok(VcpuExit::IoOut(port, data)) => {
                 // because vcpufd.run() mutably borrows self we cannot pass self to crate::debug! macro here
-                crate::debug!("KVM IO Details : \nPort : {}\nData : {:?}", port, data);
+                // crate::debug!("KVM IO Details : \nPort : {}\nData : {:?}", port, data);
                 // KVM does not need to set RIP or instruction length so these are set to 0
                 HyperlightExit::IoOut(port, data.to_vec(), 0, 0)
             }
             Ok(VcpuExit::MmioRead(addr, _)) => {
-                crate::debug!("KVM MMIO Read -Details: Address: {} \n {:#?}", addr, &self);
+                crate::debug!(
+                    "KVM MMIO Read -Details: Address: {:#x} \n {:#x?}",
+                    addr,
+                    &self
+                );
 
                 match self.get_memory_access_violation(
                     addr as usize,
@@ -292,7 +311,11 @@ impl Hypervisor for KVMDriver {
                 }
             }
             Ok(VcpuExit::MmioWrite(addr, _)) => {
-                crate::debug!("KVM MMIO Write -Details: Address: {} \n {:#?}", addr, &self);
+                crate::debug!(
+                    "KVM MMIO Write -Details: Address: {:#x} \n {:#x?}",
+                    addr,
+                    &self
+                );
 
                 match self.get_memory_access_violation(
                     addr as usize,
