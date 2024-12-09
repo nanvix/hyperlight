@@ -46,6 +46,7 @@ fn main() -> Result<()> {
                 GuestBinary::FilePath(path),
                 None,
                 None,
+                None,
                 Some(&writer_func),
             )?;
 
@@ -87,6 +88,7 @@ fn main() -> Result<()> {
     // Create a new sandbox.
     let usandbox = UninitializedSandbox::new(
         GuestBinary::FilePath(hyperlight_guest_path.clone()),
+        None,
         None,
         None,
         None,

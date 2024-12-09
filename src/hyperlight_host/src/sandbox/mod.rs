@@ -216,6 +216,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap_or_else(|_| panic!("Failed to create UninitializedSandbox {}", i));
 

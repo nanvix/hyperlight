@@ -33,8 +33,13 @@ fn main() -> Result<()> {
         simple_guest_as_string().expect("Cannot find the guest binary at the expected location.");
 
     // Create a new sandbox.
-    let usandbox =
-        UninitializedSandbox::new(GuestBinary::FilePath(simple_guest_path), None, None, None)?;
+    let usandbox = UninitializedSandbox::new(
+        GuestBinary::FilePath(simple_guest_path),
+        None,
+        None,
+        None,
+        None,
+    )?;
 
     // NOTE: if replacing MultiUseSandbox with SingleUseSandbox, the function call will take ~50x longer because the drop
     // happens inside `call_guest_function_by_name` rather than at the end of of this `main` block.

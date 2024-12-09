@@ -161,6 +161,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap();
 
@@ -197,6 +198,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap();
 
@@ -226,6 +228,7 @@ mod tests {
         let uninitialized_sandbox = || {
             UninitializedSandbox::new(
                 GuestBinary::FilePath(simple_guest_as_string().expect("Guest Binary Missing")),
+                None,
                 None,
                 None,
                 None,
@@ -339,6 +342,7 @@ mod tests {
         // in-hypervisor mode
         let u_sbox = UninitializedSandbox::new(
             guest_bin(),
+            None,
             // for now, we're using defaults. In the future, we should get
             // variability below
             None,
@@ -396,6 +400,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )?;
         let sandbox: MultiUseSandbox = usbox.evolve(Noop::default())?;
         let mut ctx = sandbox.new_call_context();
@@ -442,6 +447,7 @@ mod tests {
         }
         let mut usbox = UninitializedSandbox::new(
             GuestBinary::FilePath(callback_guest_as_string().expect("Guest Binary Missing")),
+            None,
             None,
             None,
             None,

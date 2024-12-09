@@ -27,7 +27,7 @@ use hyperlight_testing::simple_guest_as_string;
 
 fn create_uninit_sandbox() -> UninitializedSandbox {
     let path = simple_guest_as_string().unwrap();
-    UninitializedSandbox::new(GuestBinary::FilePath(path), None, None, None).unwrap()
+    UninitializedSandbox::new(GuestBinary::FilePath(path), None, None, None, None).unwrap()
 }
 
 fn create_multiuse_sandbox() -> MultiUseSandbox {

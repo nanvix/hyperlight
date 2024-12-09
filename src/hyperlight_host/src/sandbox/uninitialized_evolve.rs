@@ -168,6 +168,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap();
             evolve_impl_multi_use(u_sbox).unwrap();

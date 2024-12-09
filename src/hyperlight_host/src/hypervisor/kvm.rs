@@ -24,9 +24,11 @@ use tracing::{instrument, Span};
 
 use super::fpu::{FP_CONTROL_WORD_DEFAULT, FP_TAG_WORD_DEFAULT, MXCSR_DEFAULT};
 use super::handlers::{MemAccessHandlerWrapper, OutBHandlerWrapper};
+use super::{HyperlightExit, Hypervisor, VirtualCPU};
+#[cfg(feature = "init-paging")]
 use super::{
-    HyperlightExit, Hypervisor, VirtualCPU, CR0_AM, CR0_ET, CR0_MP, CR0_NE, CR0_PE, CR0_PG, CR0_WP,
-    CR4_OSFXSR, CR4_OSXMMEXCPT, CR4_PAE, EFER_LMA, EFER_LME, EFER_NX, EFER_SCE,
+    CR0_AM, CR0_ET, CR0_MP, CR0_NE, CR0_PE, CR0_PG, CR0_WP, CR4_OSFXSR, CR4_OSXMMEXCPT, CR4_PAE,
+    EFER_LMA, EFER_LME, EFER_NX, EFER_SCE,
 };
 use crate::hypervisor::hypervisor_handler::HypervisorHandler;
 use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
@@ -61,6 +63,8 @@ pub(super) struct KVMDriver {
     _vm_fd: VmFd,
     vcpu_fd: VcpuFd,
     entrypoint: u64,
+    initrd_addr: u64,
+    initrd_size: usize,
     orig_rsp: GuestPtr,
     mem_regions: Vec<MemoryRegion>,
 }
@@ -74,6 +78,8 @@ impl KVMDriver {
         mem_regions: Vec<MemoryRegion>,
         pml4_addr: u64,
         entrypoint: u64,
+        initrd_addr: u64,
+        initrd_size: usize,
         rsp: u64,
     ) -> Result<Self> {
         if !is_hypervisor_present() {
@@ -110,20 +116,30 @@ impl KVMDriver {
             _vm_fd: vm_fd,
             vcpu_fd,
             entrypoint,
+            initrd_addr,
+            initrd_size,
             orig_rsp: rsp_gp,
             mem_regions,
         })
     }
 
     #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
+    #[allow(unused)]
     fn setup_initial_sregs(vcpu_fd: &mut VcpuFd, pml4_addr: u64) -> Result<()> {
         // setup paging and IA-32e (64-bit) mode
         let mut sregs = vcpu_fd.get_sregs()?;
-        sregs.cr3 = pml4_addr;
-        sregs.cr4 = CR4_PAE | CR4_OSFXSR | CR4_OSXMMEXCPT;
-        sregs.cr0 = CR0_PE | CR0_MP | CR0_ET | CR0_NE | CR0_AM | CR0_PG | CR0_WP;
-        sregs.efer = EFER_LME | EFER_LMA | EFER_SCE | EFER_NX;
-        sregs.cs.l = 1; // required for 64-bit mode
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "init-paging")] {
+                sregs.cr3 = pml4_addr;
+                sregs.cr4 = CR4_PAE | CR4_OSFXSR | CR4_OSXMMEXCPT;
+                sregs.cr0 = CR0_PE | CR0_MP | CR0_ET | CR0_NE | CR0_AM | CR0_PG | CR0_WP;
+                sregs.efer = EFER_LME | EFER_LMA | EFER_SCE | EFER_NX;
+                sregs.cs.l = 1; // required for 64-bit mode
+            } else {
+                sregs.cs.base = 0;
+                sregs.cs.selector = 0;
+            }
+        }
         vcpu_fd.set_sregs(&sregs)?;
         Ok(())
     }
@@ -168,9 +184,20 @@ impl Hypervisor for KVMDriver {
         mem_access_hdl: MemAccessHandlerWrapper,
         hv_handler: Option<HypervisorHandler>,
     ) -> Result<()> {
+        // Encode initrd location and size:
+        // - Lower 12 bits encode the size in 4KB pages
+        // - Higher bits encode the base address
+        let (initrd_base, initrd_size): (u64, u64) = (self.initrd_addr, self.initrd_size as u64);
+        let rbx: u64 = (initrd_base & 0xfffff000) | ((initrd_size >> 12) & 0xfff);
+
         let regs = kvm_regs {
             rip: self.entrypoint,
             rsp: self.orig_rsp.absolute()?,
+
+            // Kernel args.
+            rax: 0x0c00ffee, // Magic Value for Hyperlight Bootloader
+            rbx,             // Initrd location
+            rflags: 2,       // Always set to 2
 
             // function args
             rcx: peb_addr.into(),

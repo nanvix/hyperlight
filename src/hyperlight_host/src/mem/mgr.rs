@@ -44,18 +44,24 @@ use crate::error::HyperlightError::{
 };
 use crate::error::HyperlightHostError;
 use crate::sandbox::SandboxConfiguration;
-use crate::{log_then_return, new_error, HyperlightError, Result};
+#[cfg(feature = "init-paging")]
+use crate::HyperlightError;
+use crate::{log_then_return, new_error, Result};
 
-/// Paging Flags
-///
-/// See the following links explaining paging, also see paging-development-notes.md in docs:
-///
-/// * Very basic description: https://stackoverflow.com/a/26945892
-/// * More in-depth descriptions: https://wiki.osdev.org/Paging
-const PAGE_PRESENT: u64 = 1; // Page is Present
-const PAGE_RW: u64 = 1 << 1; // Page is Read/Write (if not set page is read only so long as the WP bit in CR0 is set to 1 - which it is in Hyperlight)
-const PAGE_USER: u64 = 1 << 2; // User/Supervisor (if this bit is set then the page is accessible by user mode code)
-const PAGE_NX: u64 = 1 << 63; // Execute Disable (if this bit is set then data in the page cannot be executed)
+cfg_if::cfg_if! {
+    if #[cfg(feature = "init-paging")] {
+        /// Paging Flags
+        ///
+        /// See the following links explaining paging, also see paging-development-notes.md in docs:
+        ///
+        /// * Very basic description: https://stackoverflow.com/a/26945892
+        /// * More in-depth descriptions: https://wiki.osdev.org/Paging
+        const PAGE_PRESENT: u64 = 1; // Page is Present
+        const PAGE_RW: u64 = 1 << 1; // Page is Read/Write (if not set page is read only so long as the WP bit in CR0 is set to 1 - which it is in Hyperlight)
+        const PAGE_USER: u64 = 1 << 2; // User/Supervisor (if this bit is set then the page is accessible by user mode code)
+        const PAGE_NX: u64 = 1 << 63; // Execute Disable (if this bit is set then data in the page cannot be executed)
+    }
+}
 
 // The amount of memory that can be mapped per page table
 pub(super) const AMOUNT_OF_MEMORY_PER_PT: usize = 0x200000;
@@ -78,6 +84,8 @@ pub(crate) struct SandboxMemoryManager<S> {
     pub(crate) load_addr: RawPtr,
     /// Offset for the execution entrypoint from `load_addr`
     pub(crate) entrypoint_offset: Offset,
+    pub(crate) initrd_addr: RawPtr,
+    pub(crate) initrd_size: usize,
     /// A vector of memory snapshots that can be used to save and  restore the state of the memory
     /// This is used by the Rust Sandbox implementation (rather than the mem_snapshot field above which only exists to support current C API)
     snapshots: Arc<Mutex<Vec<SharedMemorySnapshot>>>,
@@ -107,6 +115,8 @@ where
             shared_mem,
             inprocess,
             load_addr,
+            initrd_addr: RawPtr::from(0),
+            initrd_size: 0,
             entrypoint_offset,
             snapshots: Arc::new(Mutex::new(Vec::new())),
             #[cfg(target_os = "windows")]
@@ -129,6 +139,7 @@ where
     // TODO: This should perhaps happen earlier and use an
     // ExclusiveSharedMemory from the beginning.
     #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
+    #[cfg(feature = "init-paging")]
     pub(crate) fn set_up_shared_memory(
         &mut self,
         mem_size: u64,
@@ -530,6 +541,8 @@ impl SandboxMemoryManager<ExclusiveSharedMemory> {
                 layout: self.layout,
                 inprocess: self.inprocess,
                 load_addr: self.load_addr.clone(),
+                initrd_addr: self.initrd_addr.clone(),
+                initrd_size: self.initrd_size,
                 entrypoint_offset: self.entrypoint_offset,
                 snapshots: Arc::new(Mutex::new(Vec::new())),
                 #[cfg(target_os = "windows")]
@@ -540,6 +553,8 @@ impl SandboxMemoryManager<ExclusiveSharedMemory> {
                 layout: self.layout,
                 inprocess: self.inprocess,
                 load_addr: self.load_addr.clone(),
+                initrd_addr: self.initrd_addr.clone(),
+                initrd_size: self.initrd_size,
                 entrypoint_offset: self.entrypoint_offset,
                 snapshots: Arc::new(Mutex::new(Vec::new())),
                 #[cfg(target_os = "windows")]

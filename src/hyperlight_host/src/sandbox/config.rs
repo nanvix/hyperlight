@@ -85,6 +85,8 @@ pub struct SandboxConfiguration {
     /// The size of the memory buffer that is made available for serializing
     /// guest panic context
     guest_panic_context_buffer_size: usize,
+    /// Total memory size.
+    guest_memory_size: usize,
 }
 
 impl SandboxConfiguration {
@@ -136,6 +138,8 @@ impl SandboxConfiguration {
     pub const MIN_KERNEL_STACK_SIZE: usize = 0x1000;
     /// The default value for kernel stack size
     pub const DEFAULT_KERNEL_STACK_SIZE: usize = Self::MIN_KERNEL_STACK_SIZE;
+    /// The maximum amount of memory a single sandbox will be allowed.
+    pub const MAX_GUEST_MEMORY_SIZE: usize = 0x40000000;
 
     #[allow(clippy::too_many_arguments)]
     /// Create a new configuration for a sandbox with the given sizes.
@@ -220,6 +224,7 @@ impl SandboxConfiguration {
                 guest_panic_context_buffer_size,
                 Self::MIN_GUEST_PANIC_CONTEXT_BUFFER_SIZE,
             ),
+            guest_memory_size: 0,
         }
     }
 
@@ -346,6 +351,11 @@ impl SandboxConfiguration {
         );
     }
 
+    /// Set the total memory size.
+    pub fn set_guest_memory_size(&mut self, guest_memory_size: usize) {
+        self.guest_memory_size = guest_memory_size;
+    }
+
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub(crate) fn get_guest_error_buffer_size(&self) -> usize {
         self.guest_error_buffer_size
@@ -419,6 +429,11 @@ impl SandboxConfiguration {
     pub(crate) fn get_heap_size(&self, exe_info: &ExeInfo) -> u64 {
         self.heap_size_override_opt()
             .unwrap_or_else(|| exe_info.heap_reserve())
+    }
+
+    /// Get the total memory size.
+    pub(crate) fn get_guest_memory_size(&self) -> usize {
+        self.guest_memory_size
     }
 }
 

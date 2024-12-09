@@ -17,15 +17,19 @@ limitations under the License.
 use std::fmt::Debug;
 use std::mem::{offset_of, size_of};
 
-use hyperlight_common::mem::{GuestStackData, HyperlightPEB, RunMode, PAGE_SIZE_USIZE};
+use hyperlight_common::mem::{
+    GuestStackData, HyperlightPEB, RunMode, PAGE_SIZE_USIZE, PAGE_TABLE_SIZE_USIZE,
+};
 use paste::paste;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use tracing::{instrument, Span};
 
+#[cfg(feature = "init-paging")]
+use super::memory_region::MemoryRegionType::PageTables;
 use super::memory_region::MemoryRegionType::{
     BootStack, Code, GuardPage, GuestErrorData, Heap, HostExceptionData, HostFunctionDefinitions,
-    InputData, KernelStack, OutputData, PageTables, PanicContext, Peb, Stack,
+    InputData, KernelStack, OutputData, PanicContext, Peb, Stack,
 };
 use super::memory_region::{MemoryRegion, MemoryRegionFlags, MemoryRegionVecBuilder};
 use super::mgr::AMOUNT_OF_MEMORY_PER_PT;
@@ -155,6 +159,7 @@ pub(crate) struct SandboxMemoryLayout {
     #[allow(dead_code)]
     pub(super) kernel_stack_size_rounded: usize,
     boot_stack_buffer_offset: usize,
+    user_memory_offset: usize,
 
     // other
     pub(crate) peb_address: usize,
@@ -281,6 +286,10 @@ impl Debug for SandboxMemoryLayout {
                 "Boot Stack Buffer Offset",
                 &format_args!("{:#x}", self.boot_stack_buffer_offset),
             )
+            .field(
+                "User Memory Offset",
+                &format_args!("{:#x}", self.user_memory_offset),
+            )
             .finish()
     }
 }
@@ -304,13 +313,9 @@ impl SandboxMemoryLayout {
     /// The address (not the offset) into sandbox memory where the Page
     /// Tables start
     pub(super) const PT_GUEST_ADDRESS: usize = Self::BASE_ADDRESS + Self::PT_OFFSET;
-    /// The maximum amount of memory a single sandbox will be allowed.
-    /// The addressable virtual memory with current paging setup is virtual address 0x0 - 0x40000000 (excl.),
-    /// However, the memory up to Self::BASE_ADDRESS is not used.
-    const MAX_MEMORY_SIZE: usize = 0x40000000 - Self::BASE_ADDRESS;
 
     /// The base address of the sandbox's memory.
-    pub(crate) const BASE_ADDRESS: usize = 0x0200000;
+    pub(crate) const BASE_ADDRESS: usize = 0x0000000;
 
     // the offset into a sandbox's input/output buffer where the stack starts
     const STACK_POINTER_SIZE_BYTES: u64 = 8;
@@ -326,9 +331,9 @@ impl SandboxMemoryLayout {
     ) -> Result<Self> {
         let total_page_table_size =
             Self::get_total_page_table_size(cfg, code_size, stack_size, heap_size);
-        let guest_code_offset = total_page_table_size;
+        let guest_code_offset = Self::BASE_ADDRESS;
         // The following offsets are to the fields of the PEB struct itself!
-        let peb_offset = total_page_table_size + round_up_to(code_size, PAGE_SIZE_USIZE);
+        let peb_offset = guest_code_offset + round_up_to(code_size, PAGE_SIZE_USIZE);
         let peb_security_cookie_seed_offset =
             peb_offset + offset_of!(HyperlightPEB, security_cookie_seed);
         let peb_guest_dispatch_function_ptr_offset =
@@ -375,10 +380,10 @@ impl SandboxMemoryLayout {
             output_data_buffer_offset + cfg.get_output_data_size(),
             PAGE_SIZE_USIZE,
         );
-        // make sure heap buffer starts at 4K boundary
+        // make sure heap buffer starts at 4MB boundary
         let guest_heap_buffer_offset = round_up_to(
             guest_panic_context_buffer_offset + cfg.get_guest_panic_context_buffer_size(),
-            PAGE_SIZE_USIZE,
+            PAGE_TABLE_SIZE_USIZE,
         );
         // make sure guard page starts at 4K boundary
         let guard_page_offset = round_up_to(guest_heap_buffer_offset + heap_size, PAGE_SIZE_USIZE);
@@ -391,6 +396,7 @@ impl SandboxMemoryLayout {
         let kernel_stack_size_rounded = round_up_to(cfg.get_kernel_stack_size(), PAGE_SIZE_USIZE);
         let kernel_stack_guard_page_offset = kernel_stack_buffer_offset + kernel_stack_size_rounded;
         let boot_stack_buffer_offset = kernel_stack_guard_page_offset + PAGE_SIZE_USIZE;
+        let user_memory_offset = boot_stack_buffer_offset + PAGE_SIZE_USIZE;
 
         Ok(Self {
             peb_offset,
@@ -427,6 +433,7 @@ impl SandboxMemoryLayout {
             kernel_stack_guard_page_offset,
             kernel_stack_size_rounded,
             boot_stack_buffer_offset,
+            user_memory_offset,
         })
     }
 
@@ -646,7 +653,11 @@ impl SandboxMemoryLayout {
     /// layout.
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     fn get_unaligned_memory_size(&self) -> usize {
-        self.get_boot_stack_buffer_offset() + PAGE_SIZE_USIZE
+        if self.sandbox_memory_config.get_guest_memory_size() == 0 {
+            self.user_memory_offset
+        } else {
+            self.sandbox_memory_config.get_guest_memory_size()
+        }
     }
 
     /// get the code offset
@@ -688,6 +699,13 @@ impl SandboxMemoryLayout {
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub(super) fn get_boot_stack_buffer_offset(&self) -> usize {
         self.boot_stack_buffer_offset
+    }
+
+    /// Get the offset in guest memory to the user memory
+    /// This is the offset in the sandbox memory where the user memory starts
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
+    pub(super) fn get_user_memory_offset(&self) -> usize {
+        self.user_memory_offset
     }
 
     #[cfg(test)]
@@ -763,8 +781,11 @@ impl SandboxMemoryLayout {
             _ => (multiples + 1) * PAGE_SIZE_USIZE,
         };
 
-        if size > Self::MAX_MEMORY_SIZE {
-            Err(MemoryRequestTooBig(size, Self::MAX_MEMORY_SIZE))
+        if size > SandboxConfiguration::MAX_GUEST_MEMORY_SIZE {
+            Err(MemoryRequestTooBig(
+                size,
+                SandboxConfiguration::MAX_GUEST_MEMORY_SIZE,
+            ))
         } else {
             Ok(size)
         }
@@ -775,19 +796,23 @@ impl SandboxMemoryLayout {
     pub fn get_memory_regions(&self, shared_mem: &GuestSharedMemory) -> Result<Vec<MemoryRegion>> {
         let mut builder = MemoryRegionVecBuilder::new(Self::BASE_ADDRESS, shared_mem.base_addr());
 
-        // PML4, PDPT, PD
-        let code_offset = builder.push_page_aligned(
-            self.total_page_table_size,
-            MemoryRegionFlags::READ | MemoryRegionFlags::WRITE,
-            PageTables,
-        );
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "init-paging")] {
+                // PML4, PDPT, PD
+                let code_offset = builder.push_page_aligned(
+                    self.total_page_table_size,
+                    MemoryRegionFlags::READ | MemoryRegionFlags::WRITE,
+                    PageTables,
+                );
 
-        if code_offset != self.guest_code_offset {
-            return Err(new_error!(
-                "Code offset does not match expected code offset expected:  {}, actual:  {}",
-                self.guest_code_offset,
-                code_offset
-            ));
+                if code_offset != self.guest_code_offset {
+                    return Err(new_error!(
+                        "Code offset does not match expected code offset expected:  {}, actual:  {}",
+                        self.guest_code_offset,
+                        code_offset
+                    ));
+                }
+            }
         }
 
         // code
@@ -916,11 +941,19 @@ impl SandboxMemoryLayout {
         }
 
         // guest panic context
-        let heap_offset = builder.push_page_aligned(
+        let heap_guard_offset = builder.push_page_aligned(
             self.sandbox_memory_config
                 .get_guest_panic_context_buffer_size(),
             MemoryRegionFlags::READ | MemoryRegionFlags::WRITE,
             PanicContext,
+        );
+
+        let heap_guard_size = self.guest_heap_buffer_offset - heap_guard_offset;
+
+        let heap_offset = builder.push_page_aligned(
+            heap_guard_size,
+            MemoryRegionFlags::READ | MemoryRegionFlags::STACK_GUARD,
+            GuardPage,
         );
 
         let expected_heap_offset = TryInto::<usize>::try_into(self.guest_heap_buffer_offset)?;
@@ -1044,11 +1077,33 @@ impl SandboxMemoryLayout {
             ));
         }
 
-        let final_offset = builder.push_page_aligned(
+        let user_memory_offset = builder.push_page_aligned(
             PAGE_SIZE_USIZE,
             MemoryRegionFlags::READ | MemoryRegionFlags::WRITE,
             BootStack,
         );
+
+        let expected_user_memory_offset = TryInto::<usize>::try_into(self.user_memory_offset)?;
+
+        if user_memory_offset != expected_user_memory_offset {
+            return Err(new_error!(
+                "User Memory offset does not match expected User Memory offset expected:  {}, actual:  {}",
+                expected_user_memory_offset,
+                user_memory_offset
+            ));
+        }
+
+        let user_region_size = self.get_memory_size()? - user_memory_offset;
+
+        let final_offset = if user_region_size > 0 {
+            builder.push_page_aligned(
+                user_region_size,
+                MemoryRegionFlags::READ | MemoryRegionFlags::WRITE | MemoryRegionFlags::EXECUTE,
+                Code,
+            )
+        } else {
+            user_memory_offset
+        };
 
         let expected_final_offset = TryInto::<usize>::try_into(self.get_memory_size()?)?;
 
@@ -1079,7 +1134,7 @@ impl SandboxMemoryLayout {
         macro_rules! get_address {
             ($something:ident) => {
                 paste! {
-                    if guest_offset == 0 {
+                    if run_inprocess && guest_offset == 0 {
                         let offset = self.[<$something _offset>];
                         let calculated_addr = shared_mem.calculate_address(offset)?;
                         u64::try_from(calculated_addr)?
@@ -1252,6 +1307,21 @@ impl SandboxMemoryLayout {
         )?;
 
         Ok(())
+    }
+
+    #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
+    pub(crate) fn write_user_memory(
+        &self,
+        shared_mem: &mut ExclusiveSharedMemory,
+        bytes: &[u8],
+    ) -> Result<(u64, usize)> {
+        if self.user_memory_offset + bytes.len() > self.get_memory_size()? {
+            return Err(
+                new_error!("Not enough memory in shared memory to write user memory").into(),
+            );
+        }
+        shared_mem.copy_from_slice(bytes, self.user_memory_offset)?;
+        Ok((self.user_memory_offset as u64, bytes.len()))
     }
 }
 

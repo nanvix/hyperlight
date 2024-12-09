@@ -43,7 +43,9 @@ use crate::mem::layout::SandboxMemoryLayout;
 use crate::mem::mgr::SandboxMemoryManager;
 use crate::mem::ptr::{GuestPtr, RawPtr};
 use crate::mem::ptr_offset::Offset;
-use crate::mem::shared_mem::{GuestSharedMemory, HostSharedMemory, SharedMemory};
+#[cfg(feature = "init-paging")]
+use crate::mem::shared_mem::SharedMemory;
+use crate::mem::shared_mem::{GuestSharedMemory, HostSharedMemory};
 use crate::sandbox::hypervisor::{get_available_hypervisor, HypervisorType};
 #[cfg(feature = "function_call_metrics")]
 use crate::sandbox::metrics::SandboxMetric::GuestFunctionCallDurationMicroseconds;
@@ -788,13 +790,17 @@ fn set_up_hypervisor_partition(
     #[allow(unused_variables)] // parameter only used for in-process mode
     outb_handler: OutBHandlerWrapper,
 ) -> Result<Box<dyn Hypervisor>> {
-    let mem_size = u64::try_from(mgr.shared_mem.mem_size())?;
+    #[allow(unused_mut)]
     let mut regions = mgr.layout.get_memory_regions(&mgr.shared_mem)?;
+    #[cfg(feature = "init-paging")]
     let rsp_ptr = {
+        let mem_size = u64::try_from(mgr.shared_mem.mem_size())?;
         let rsp_u64 = mgr.set_up_shared_memory(mem_size, &mut regions)?;
         let rsp_raw = RawPtr::from(rsp_u64);
         GuestPtr::try_from(rsp_raw)
     }?;
+    #[cfg(not(feature = "init-paging"))]
+    let rsp_ptr = GuestPtr::try_from(Offset::from(0))?;
     let base_ptr = GuestPtr::try_from(Offset::from(0))?;
     let pml4_ptr = {
         let pml4_offset_u64 = u64::try_from(SandboxMemoryLayout::PML4_OFFSET)?;
@@ -864,6 +870,8 @@ fn set_up_hypervisor_partition(
                     regions,
                     pml4_ptr.absolute()?,
                     entrypoint_ptr.absolute()?,
+                    mgr.initrd_addr.clone().into(),
+                    mgr.initrd_size,
                     rsp_ptr.absolute()?,
                 )?;
                 Ok(Box::new(hv))
@@ -912,6 +920,7 @@ mod tests {
         }
         let usbox = UninitializedSandbox::new(
             GuestBinary::FilePath(simple_guest_as_string().expect("Guest Binary Missing")),
+            None,
             None,
             None,
             None,

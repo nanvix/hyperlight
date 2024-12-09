@@ -32,6 +32,7 @@ pub fn new_uninit() -> Result<UninitializedSandbox> {
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -39,6 +40,7 @@ pub fn new_uninit() -> Result<UninitializedSandbox> {
 pub fn new_uninit_rust() -> Result<UninitializedSandbox> {
     UninitializedSandbox::new(
         GuestBinary::FilePath(simple_guest_as_string().unwrap()),
+        None,
         None,
         None,
         None,
@@ -53,15 +55,27 @@ pub fn get_simpleguest_sandboxes(
 
     vec![
         // in hypervisor elf
-        UninitializedSandbox::new(GuestBinary::FilePath(elf_path.clone()), None, None, writer)
-            .unwrap()
-            .evolve(Noop::default())
-            .unwrap(),
+        UninitializedSandbox::new(
+            GuestBinary::FilePath(elf_path.clone()),
+            None,
+            None,
+            None,
+            writer,
+        )
+        .unwrap()
+        .evolve(Noop::default())
+        .unwrap(),
         // in hypervisor exe
-        UninitializedSandbox::new(GuestBinary::FilePath(exe_path.clone()), None, None, writer)
-            .unwrap()
-            .evolve(Noop::default())
-            .unwrap(),
+        UninitializedSandbox::new(
+            GuestBinary::FilePath(exe_path.clone()),
+            None,
+            None,
+            None,
+            writer,
+        )
+        .unwrap()
+        .evolve(Noop::default())
+        .unwrap(),
         // in-process elf
         #[cfg(inprocess)]
         UninitializedSandbox::new(
@@ -106,11 +120,23 @@ pub fn get_callbackguest_uninit_sandboxes(
 
     vec![
         // in hypervisor elf
-        UninitializedSandbox::new(GuestBinary::FilePath(elf_path.clone()), None, None, writer)
-            .unwrap(),
+        UninitializedSandbox::new(
+            GuestBinary::FilePath(elf_path.clone()),
+            None,
+            None,
+            None,
+            writer,
+        )
+        .unwrap(),
         // in hypervisor exe
-        UninitializedSandbox::new(GuestBinary::FilePath(exe_path.clone()), None, None, writer)
-            .unwrap(),
+        UninitializedSandbox::new(
+            GuestBinary::FilePath(exe_path.clone()),
+            None,
+            None,
+            None,
+            writer,
+        )
+        .unwrap(),
         // in-process elf
         #[cfg(inprocess)]
         UninitializedSandbox::new(

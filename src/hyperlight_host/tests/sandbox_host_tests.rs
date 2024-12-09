@@ -391,6 +391,7 @@ fn max_memory_sandbox() {
     cfg.set_input_data_size(0x40000000);
     let a = UninitializedSandbox::new(
         GuestBinary::FilePath(simple_guest_as_string().unwrap()),
+        None,
         Some(cfg),
         None,
         None,
