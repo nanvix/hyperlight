@@ -303,7 +303,7 @@ impl Hypervisor for KVMDriver {
             }
             Ok(VcpuExit::IoOut(port, data)) => {
                 // because vcpufd.run() mutably borrows self we cannot pass self to crate::debug! macro here
-                crate::debug!("KVM IO Details : \nPort : {}\nData : {:?}", port, data);
+                // crate::debug!("KVM IO Details : \nPort : {}\nData : {:?}", port, data);
                 // KVM does not need to set RIP or instruction length so these are set to 0
                 HyperlightExit::IoOut(port, data.to_vec(), 0, 0)
             }
