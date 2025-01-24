@@ -184,11 +184,22 @@ impl Hypervisor for KVMDriver {
         mem_access_hdl: MemAccessHandlerWrapper,
         hv_handler: Option<HypervisorHandler>,
     ) -> Result<()> {
+        let nzeros: usize = 12; // TODO: change this to INITRD_BASE.trailing_zeros()
+        let max_initrd_size: usize = (1 << 12) * ((1 << nzeros) - 1);
+        if self.initrd_size > max_initrd_size {
+            return Err(new_error!(
+                "initrd is too large (initrd_size={}, max_initrd_size={:?})",
+                self.initrd_size,
+                max_initrd_size
+            ));
+        }
+
         // Encode initrd location and size:
         // - Lower 12 bits encode the size in 4KB pages
         // - Higher bits encode the base address
         let (initrd_base, initrd_size): (u64, u64) = (self.initrd_addr, self.initrd_size as u64);
-        let rbx: u64 = (initrd_base & 0xfffff000) | ((initrd_size >> 12) & 0xfff);
+        let rbx: u64 =
+            (initrd_base & !((1 << nzeros) - 1)) | ((initrd_size >> 12) & ((1 << nzeros) - 1));
 
         let regs = kvm_regs {
             rip: self.entrypoint,
