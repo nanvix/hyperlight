@@ -123,7 +123,7 @@ cfg_aliases = "0.2.1"
 built = { version = "0.7.0", features = ["chrono"] }
 
 [features]
-default = ["kvm", "mshv", "seccomp", "init-paging"]
+default = ["kvm", "mshv", "seccomp", "init-paging", "remove-timeout"]
 seccomp = ["dep:seccompiler"]
 function_call_metrics = []
 executable_heap = []
@@ -136,6 +136,7 @@ kvm = ["dep:kvm-bindings", "dep:kvm-ioctls"]
 mshv = ["dep:mshv-bindings", "dep:mshv-ioctls"]
 inprocess = []
 init-paging = []
+remove-timeout= []
 
 [[bench]]
 name = "benchmarks"
