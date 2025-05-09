@@ -19,6 +19,8 @@ limitations under the License.
 pub const PAGE_SHIFT: u64 = 12;
 pub const PAGE_SIZE: u64 = 1 << 12;
 pub const PAGE_SIZE_USIZE: usize = 1 << 12;
+pub const PAGE_TABLE_SHIFT: u64 = 22;
+pub const PAGE_TABLE_SIZE_USIZE: usize = 1 << 22;
 
 use core::ffi::{c_char, c_void};
 
