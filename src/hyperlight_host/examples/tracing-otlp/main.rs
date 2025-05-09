@@ -134,6 +134,7 @@ fn run_example(wait_input: bool) -> HyperlightResult<()> {
                     GuestBinary::FilePath(path.clone()),
                     None,
                     None,
+                    None,
                     Some(&writer_func),
                 )?;
 

@@ -391,6 +391,7 @@ fn max_memory_sandbox() {
     cfg.set_input_data_size(0x40000000);
     let a = UninitializedSandbox::new(
         GuestBinary::FilePath(simple_guest_as_string().unwrap()),
+        None,
         Some(cfg),
         None,
         None,
@@ -522,6 +523,7 @@ fn only_one_sandbox_instance_with_loadlib() {
     let _sandbox = UninitializedSandbox::new(
         GuestBinary::FilePath(simple_guest_exe_as_string().unwrap()),
         None,
+        None,
         Some(SandboxRunOptions::RunInProcess(true)),
         None,
     )
@@ -529,6 +531,7 @@ fn only_one_sandbox_instance_with_loadlib() {
 
     let err = UninitializedSandbox::new(
         GuestBinary::FilePath(simple_guest_exe_as_string().unwrap()),
+        None,
         None,
         Some(SandboxRunOptions::RunInProcess(true)),
         None,

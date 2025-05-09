@@ -23,6 +23,7 @@ fuzz_target!(
             None,
             None,
             None,
+            None,
         )
         .unwrap();
 

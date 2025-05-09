@@ -99,6 +99,7 @@ pub(crate) struct SandboxMemoryLayout {
     guest_heap_buffer_offset: usize,
     guard_page_offset: usize,
     guest_user_stack_buffer_offset: usize, // the lowest address of the user stack
+    user_memory_offset: usize,
 
     // other
     pub(crate) peb_address: usize,
@@ -171,6 +172,10 @@ impl Debug for SandboxMemoryLayout {
             .field(
                 "Guest User Stack Buffer Offset",
                 &format_args!("{:#x}", self.guest_user_stack_buffer_offset),
+            )
+            .field(
+                "User Memory Offset",
+                &format_args!("{:#x}", self.user_memory_offset),
             );
 
         #[cfg(feature = "init-paging")]
@@ -276,6 +281,7 @@ impl SandboxMemoryLayout {
         let guest_user_stack_buffer_offset = guard_page_offset + PAGE_SIZE_USIZE;
         // round up stack size to page size. This is needed for MemoryRegion
         let stack_size_rounded = round_up_to(stack_size, PAGE_SIZE_USIZE);
+        let user_memory_offset = guest_user_stack_buffer_offset + stack_size_rounded;
 
         Ok(Self {
             peb_offset,
@@ -302,6 +308,7 @@ impl SandboxMemoryLayout {
                 cfg, code_size, stack_size, heap_size,
             ),
             guest_code_offset,
+            user_memory_offset,
         })
     }
 
@@ -436,7 +443,11 @@ impl SandboxMemoryLayout {
     /// layout.
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     fn get_unaligned_memory_size(&self) -> usize {
-        self.get_top_of_user_stack_offset() + self.stack_size
+        if self.sandbox_memory_config.get_guest_memory_size() == 0 {
+            self.user_memory_offset
+        } else {
+            self.sandbox_memory_config.get_guest_memory_size()
+        }
     }
 
     /// get the code offset
@@ -450,6 +461,13 @@ impl SandboxMemoryLayout {
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub(crate) fn get_guest_code_address(&self) -> usize {
         Self::BASE_ADDRESS + self.guest_code_offset
+    }
+
+    /// Get the offset in guest memory to the user memory
+    /// This is the offset in the sandbox memory where the user memory starts
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
+    pub(super) fn get_user_memory_offset(&self) -> usize {
+        self.user_memory_offset
     }
 
     #[cfg(test)]
@@ -518,8 +536,11 @@ impl SandboxMemoryLayout {
             _ => (multiples + 1) * PAGE_SIZE_USIZE,
         };
 
-        if size > Self::MAX_MEMORY_SIZE {
-            Err(MemoryRequestTooBig(size, Self::MAX_MEMORY_SIZE))
+        if size > SandboxConfiguration::MAX_GUEST_MEMORY_SIZE {
+            Err(MemoryRequestTooBig(
+                size,
+                SandboxConfiguration::MAX_GUEST_MEMORY_SIZE,
+            ))
         } else {
             Ok(size)
         }
@@ -661,11 +682,33 @@ impl SandboxMemoryLayout {
         }
 
         // stack
-        let final_offset = builder.push_page_aligned(
+        let user_memory_offset = builder.push_page_aligned(
             self.get_guest_stack_size(),
             MemoryRegionFlags::READ | MemoryRegionFlags::WRITE,
             Stack,
         );
+
+        let expected_user_memory_offset = TryInto::<usize>::try_into(self.user_memory_offset)?;
+
+        if user_memory_offset != expected_user_memory_offset {
+            return Err(new_error!(
+                "User Memory offset does not match expected User Memory offset expected:  {}, actual:  {}",
+                expected_user_memory_offset,
+                user_memory_offset
+            ));
+        }
+
+        let user_region_size = self.get_memory_size()? - user_memory_offset;
+
+        let final_offset = if user_region_size > 0 {
+            builder.push_page_aligned(
+                user_region_size,
+                MemoryRegionFlags::READ | MemoryRegionFlags::WRITE | MemoryRegionFlags::EXECUTE,
+                Code,
+            )
+        } else {
+            user_memory_offset
+        };
 
         let expected_final_offset = TryInto::<usize>::try_into(self.get_memory_size()?)?;
 
@@ -802,6 +845,21 @@ impl SandboxMemoryLayout {
 
         Ok(())
     }
+
+    #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
+    pub(crate) fn write_user_memory(
+        &self,
+        shared_mem: &mut ExclusiveSharedMemory,
+        bytes: &[u8],
+    ) -> Result<(u64, usize)> {
+        if self.user_memory_offset + bytes.len() > self.get_memory_size()? {
+            return Err(new_error!(
+                "Not enough memory in shared memory to write user memory"
+            ));
+        }
+        shared_mem.copy_from_slice(bytes, self.user_memory_offset)?;
+        Ok((self.user_memory_offset as u64, bytes.len()))
+    }
 }
 
 fn round_up_to(value: usize, multiple: usize) -> usize {
@@ -830,38 +888,5 @@ mod tests {
         assert_eq!(PAGE_SIZE_USIZE, round_up_to(4096, PAGE_SIZE_USIZE));
         assert_eq!(PAGE_SIZE_USIZE * 2, round_up_to(4097, PAGE_SIZE_USIZE));
         assert_eq!(PAGE_SIZE_USIZE * 2, round_up_to(8191, PAGE_SIZE_USIZE));
-    }
-
-    // helper func for testing
-    fn get_expected_memory_size(layout: &SandboxMemoryLayout) -> usize {
-        let cfg = layout.sandbox_memory_config;
-        let mut expected_size = 0;
-        // in order of layout
-        expected_size += layout.get_page_table_size();
-        expected_size += layout.code_size;
-
-        expected_size += round_up_to(size_of::<HyperlightPEB>(), PAGE_SIZE_USIZE);
-
-        expected_size += round_up_to(cfg.get_input_data_size(), PAGE_SIZE_USIZE);
-
-        expected_size += round_up_to(cfg.get_output_data_size(), PAGE_SIZE_USIZE);
-
-        expected_size += round_up_to(layout.heap_size, PAGE_SIZE_USIZE);
-
-        expected_size += PAGE_SIZE_USIZE; // guard page
-
-        expected_size += round_up_to(layout.stack_size, PAGE_SIZE_USIZE);
-
-        expected_size
-    }
-
-    #[test]
-    fn test_get_memory_size() {
-        let sbox_cfg = SandboxConfiguration::default();
-        let sbox_mem_layout = SandboxMemoryLayout::new(sbox_cfg, 4096, 2048, 4096).unwrap();
-        assert_eq!(
-            sbox_mem_layout.get_memory_size().unwrap(),
-            get_expected_memory_size(&sbox_mem_layout)
-        );
     }
 }

@@ -114,6 +114,7 @@ impl MultiUseSandbox {
     ///     None,
     ///     None,
     ///     None,
+    ///     None,
     /// ).unwrap();
     /// let sbox: MultiUseSandbox = u_sbox.evolve(Noop::default()).unwrap();
     /// // Next, create a new call context from the single-use sandbox.
@@ -279,7 +280,7 @@ mod tests {
         let sbox1: MultiUseSandbox = {
             let path = simple_guest_as_string().unwrap();
             let u_sbox =
-                UninitializedSandbox::new(GuestBinary::FilePath(path), Some(cfg), None, None)
+                UninitializedSandbox::new(GuestBinary::FilePath(path), None, Some(cfg), None, None)
                     .unwrap();
             u_sbox.evolve(Noop::default())
         }
@@ -299,7 +300,7 @@ mod tests {
         let sbox2: MultiUseSandbox = {
             let path = simple_guest_as_string().unwrap();
             let u_sbox =
-                UninitializedSandbox::new(GuestBinary::FilePath(path), Some(cfg), None, None)
+                UninitializedSandbox::new(GuestBinary::FilePath(path), None, Some(cfg), None, None)
                     .unwrap();
             u_sbox.evolve(Noop::default())
         }
@@ -326,7 +327,8 @@ mod tests {
         let sbox1: MultiUseSandbox = {
             let path = simple_guest_as_string().unwrap();
             let u_sbox =
-                UninitializedSandbox::new(GuestBinary::FilePath(path), None, None, None).unwrap();
+                UninitializedSandbox::new(GuestBinary::FilePath(path), None, None, None, None)
+                    .unwrap();
             u_sbox.evolve(Noop::default())
         }
         .unwrap();

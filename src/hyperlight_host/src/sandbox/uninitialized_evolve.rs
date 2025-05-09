@@ -181,6 +181,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap();
             evolve_impl_multi_use(u_sbox).unwrap();
@@ -199,6 +200,7 @@ mod tests {
         for guest_bin_path in guest_bin_paths {
             let u_sbox: UninitializedSandbox = UninitializedSandbox::new(
                 GuestBinary::FilePath(guest_bin_path.clone()),
+                None,
                 None,
                 Some(SandboxRunOptions::RunInHypervisor),
                 None,

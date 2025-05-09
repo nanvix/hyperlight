@@ -18,6 +18,7 @@ use tracing::{instrument, Span};
 
 use crate::mem::layout::SandboxMemoryLayout;
 use crate::mem::mgr::{SandboxMemoryManager, STACK_COOKIE_LEN};
+use crate::mem::ptr::RawPtr;
 use crate::mem::shared_mem::{
     ExclusiveSharedMemory, GuestSharedMemory, HostSharedMemory, SharedMemory,
 };
@@ -90,6 +91,17 @@ impl MemMgrWrapper<ExclusiveSharedMemory> {
             SandboxMemoryLayout::BASE_ADDRESS
         };
         layout.write(shared_mem, guest_offset, mem_size, run_inprocess)
+    }
+
+    #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
+    pub(super) fn write_user_memory(&mut self, user_memory: &[u8]) -> Result<()> {
+        let mgr = self.unwrap_mgr_mut();
+        let layout = mgr.layout;
+        let shared_mem = mgr.get_shared_mem_mut();
+        let (base, size) = layout.write_user_memory(shared_mem, user_memory)?;
+        mgr.initrd_addr = RawPtr::from(base);
+        mgr.initrd_size = size;
+        Ok(())
     }
 }
 
