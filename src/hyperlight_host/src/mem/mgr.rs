@@ -27,6 +27,7 @@ use tracing::{instrument, Span};
 
 use super::exe::ExeInfo;
 use super::layout::SandboxMemoryLayout;
+#[cfg(feature = "init-paging")]
 use super::memory_region::{MemoryRegion, MemoryRegionType};
 use super::ptr::{GuestPtr, RawPtr};
 use super::ptr_offset::Offset;
@@ -34,20 +35,27 @@ use super::shared_mem::{ExclusiveSharedMemory, GuestSharedMemory, HostSharedMemo
 use super::shared_mem_snapshot::SharedMemorySnapshot;
 use crate::error::HyperlightError::NoMemorySnapshot;
 use crate::sandbox::SandboxConfiguration;
-use crate::{log_then_return, new_error, HyperlightError, Result};
+#[cfg(feature = "init-paging")]
+use crate::HyperlightError;
+use crate::{log_then_return, new_error, Result};
 
-/// Paging Flags
-///
-/// See the following links explaining paging, also see paging-development-notes.md in docs:
-///
-/// * Very basic description: https://stackoverflow.com/a/26945892
-/// * More in-depth descriptions: https://wiki.osdev.org/Paging
-const PAGE_PRESENT: u64 = 1; // Page is Present
-const PAGE_RW: u64 = 1 << 1; // Page is Read/Write (if not set page is read only so long as the WP bit in CR0 is set to 1 - which it is in Hyperlight)
-const PAGE_USER: u64 = 1 << 2; // User/Supervisor (if this bit is set then the page is accessible by user mode code)
-const PAGE_NX: u64 = 1 << 63; // Execute Disable (if this bit is set then data in the page cannot be executed)
+cfg_if::cfg_if! {
+    if #[cfg(feature = "init-paging")] {
+        /// Paging Flags
+        ///
+        /// See the following links explaining paging, also see paging-development-notes.md in docs:
+        ///
+        /// * Very basic description: https://stackoverflow.com/a/26945892
+        /// * More in-depth descriptions: https://wiki.osdev.org/Paging
+        const PAGE_PRESENT: u64 = 1; // Page is Present
+        const PAGE_RW: u64 = 1 << 1; // Page is Read/Write (if not set page is read only so long as the WP bit in CR0 is set to 1 - which it is in Hyperlight)
+        const PAGE_USER: u64 = 1 << 2; // User/Supervisor (if this bit is set then the page is accessible by user mode code)
+        const PAGE_NX: u64 = 1 << 63; // Execute Disable (if this bit is set then data in the page cannot be executed)
+    }
+}
 
 // The amount of memory that can be mapped per page table
+#[cfg(feature = "init-paging")]
 pub(super) const AMOUNT_OF_MEMORY_PER_PT: usize = 0x200_000;
 /// Read/write permissions flag for the 64-bit PDE
 /// The page size for the 64-bit PDE
@@ -102,6 +110,7 @@ where
     // TODO: This should perhaps happen earlier and use an
     // ExclusiveSharedMemory from the beginning.
     #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
+    #[cfg(feature = "init-paging")]
     pub(crate) fn set_up_shared_memory(
         &mut self,
         mem_size: u64,
@@ -194,6 +203,7 @@ where
         Ok(rsp)
     }
 
+    #[cfg(feature = "init-paging")]
     fn get_page_flags(
         p: usize,
         i: usize,
