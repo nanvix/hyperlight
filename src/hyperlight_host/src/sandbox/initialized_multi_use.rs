@@ -113,6 +113,7 @@ impl MultiUseSandbox {
     ///     GuestBinary::FilePath("some_guest_binary".to_string()),
     ///     None,
     ///     None,
+    ///     None,
     /// ).unwrap();
     /// let sbox: MultiUseSandbox = u_sbox.evolve(Noop::default()).unwrap();
     /// // Next, create a new call context from the single-use sandbox.
@@ -277,7 +278,8 @@ mod tests {
 
         let sbox1: MultiUseSandbox = {
             let path = simple_guest_as_string().unwrap();
-            let u_sbox = UninitializedSandbox::new(GuestBinary::FilePath(path), Some(cfg)).unwrap();
+            let u_sbox =
+                UninitializedSandbox::new(GuestBinary::FilePath(path), None, Some(cfg)).unwrap();
             u_sbox.evolve(Noop::default())
         }
         .unwrap();
@@ -295,7 +297,8 @@ mod tests {
 
         let sbox2: MultiUseSandbox = {
             let path = simple_guest_as_string().unwrap();
-            let u_sbox = UninitializedSandbox::new(GuestBinary::FilePath(path), Some(cfg)).unwrap();
+            let u_sbox =
+                UninitializedSandbox::new(GuestBinary::FilePath(path), None, Some(cfg)).unwrap();
             u_sbox.evolve(Noop::default())
         }
         .unwrap();
@@ -320,7 +323,8 @@ mod tests {
     fn evolve_devolve_handles_state_correctly() {
         let sbox1: MultiUseSandbox = {
             let path = simple_guest_as_string().unwrap();
-            let u_sbox = UninitializedSandbox::new(GuestBinary::FilePath(path), None).unwrap();
+            let u_sbox =
+                UninitializedSandbox::new(GuestBinary::FilePath(path), None, None).unwrap();
             u_sbox.evolve(Noop::default())
         }
         .unwrap();

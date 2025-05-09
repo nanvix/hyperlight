@@ -130,7 +130,7 @@ fn run_example(wait_input: bool) -> HyperlightResult<()> {
 
                 // Create a new sandbox.
                 let mut usandbox =
-                    UninitializedSandbox::new(GuestBinary::FilePath(path.clone()), None)?;
+                    UninitializedSandbox::new(GuestBinary::FilePath(path.clone()), None, None)?;
                 usandbox.register_print(fn_writer)?;
 
                 // Initialize the sandbox.

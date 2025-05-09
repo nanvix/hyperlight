@@ -131,7 +131,7 @@ mod tests {
         for i in 0..10 {
             let simple_guest_path = simple_guest_as_string().expect("Guest Binary Missing");
             let unintializedsandbox =
-                UninitializedSandbox::new(GuestBinary::FilePath(simple_guest_path), None)
+                UninitializedSandbox::new(GuestBinary::FilePath(simple_guest_path), None, None)
                     .unwrap_or_else(|_| panic!("Failed to create UninitializedSandbox {}", i));
 
             unintializedsandbox_queue

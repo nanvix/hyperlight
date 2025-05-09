@@ -81,6 +81,8 @@ pub struct SandboxConfiguration {
     // field should be represented as an `Option`, that type is not
     // FFI-safe, so it cannot be.
     max_initialization_time: u16,
+    /// Total memory size.
+    guest_memory_size: usize,
 }
 
 impl SandboxConfiguration {
@@ -110,6 +112,8 @@ impl SandboxConfiguration {
     pub const MIN_MAX_WAIT_FOR_CANCELLATION: u8 = 10;
     /// The maximum value for max wait for cancellation (in milliseconds)
     pub const MAX_MAX_WAIT_FOR_CANCELLATION: u8 = u8::MAX;
+    /// The maximum amount of memory a single sandbox will be allowed.
+    pub const MAX_GUEST_MEMORY_SIZE: usize = 0x40000000;
 
     #[allow(clippy::too_many_arguments)]
     /// Create a new configuration for a sandbox with the given sizes.
@@ -178,6 +182,7 @@ impl SandboxConfiguration {
             },
             #[cfg(gdb)]
             guest_debug_info,
+            guest_memory_size: 0,
         }
     }
 
@@ -324,6 +329,16 @@ impl SandboxConfiguration {
     pub(crate) fn get_heap_size(&self, exe_info: &ExeInfo) -> u64 {
         self.heap_size_override_opt()
             .unwrap_or_else(|| exe_info.heap_reserve())
+    }
+
+    /// Set the total memory size.
+    pub fn set_guest_memory_size(&mut self, guest_memory_size: usize) {
+        self.guest_memory_size = guest_memory_size;
+    }
+
+    /// Get the total memory size.
+    pub(crate) fn get_guest_memory_size(&self) -> usize {
+        self.guest_memory_size
     }
 }
 

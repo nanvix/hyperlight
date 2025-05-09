@@ -900,6 +900,8 @@ fn set_up_hypervisor_partition(
                 regions,
                 pml4_ptr.absolute()?,
                 entrypoint_ptr.absolute()?,
+                mgr.initrd_addr.clone().into(),
+                mgr.initrd_size,
                 rsp_ptr.absolute()?,
                 #[cfg(gdb)]
                 gdb_conn,
@@ -923,7 +925,6 @@ fn set_up_hypervisor_partition(
             )?;
             Ok(Box::new(hv))
         }
-
         _ => {
             log_then_return!(NoHypervisorFound());
         }
@@ -972,6 +973,7 @@ mod tests {
 
         let usbox = UninitializedSandbox::new(
             GuestBinary::FilePath(simple_guest_as_string().expect("Guest Binary Missing")),
+            None,
             cfg,
         )
         .unwrap();
