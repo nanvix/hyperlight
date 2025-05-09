@@ -61,8 +61,8 @@ test-like-ci config=default-target hypervisor="kvm":
     @# with default features
     just test {{config}} {{ if hypervisor == "mshv3" {"mshv3"} else {""} }}
 
-    @# with only one driver enabled + seccomp
-    just test {{config}} seccomp,build-metadata,{{ if hypervisor == "mshv" {"mshv2"} else if hypervisor == "mshv3" {"mshv3"} else {"kvm"} }}
+    @# with only one driver enabled + seccomp + build-metadata + init-paging
+    just test {{config}} seccomp,build-metadata,init-paging,{{ if hypervisor == "mshv" {"mshv2"} else if hypervisor == "mshv3" {"mshv3"} else {"kvm"} }}
 
     @# make sure certain cargo features compile
     cargo check -p hyperlight-host --features crashdump
@@ -104,7 +104,7 @@ test-integration guest target=default-target features="":
 test-seccomp target=default-target features="":
     @# run seccomp test with feature "seccomp" on and off
     cargo test --profile={{ if target == "debug" { "dev" } else { target } }} -p hyperlight-host test_violate_seccomp_filters --lib {{ if features =="" {''} else { "--features " + features } }} -- --ignored
-    cargo test --profile={{ if target == "debug" { "dev" } else { target } }} -p hyperlight-host test_violate_seccomp_filters --no-default-features {{ if features =~"mshv3" {"--features mshv3"} else {"--features mshv2,kvm" } }} --lib -- --ignored
+    cargo test --profile={{ if target == "debug" { "dev" } else { target } }} -p hyperlight-host test_violate_seccomp_filters --no-default-features {{ if features =~"mshv3" {"--features mshv3"} else {"--features init-paging,kvm" } }} --lib -- --ignored
 
 # runs tests that ensure compilation fails when it should
 test-compilation-fail target=default-target:
