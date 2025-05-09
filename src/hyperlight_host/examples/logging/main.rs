@@ -42,7 +42,8 @@ fn main() -> Result<()> {
         let path = hyperlight_guest_path.clone();
         let res: Result<()> = {
             // Create a new sandbox.
-            let mut usandbox = UninitializedSandbox::new(GuestBinary::FilePath(path), None, None)?;
+            let mut usandbox =
+                UninitializedSandbox::new(GuestBinary::FilePath(path), None, None, None)?;
             usandbox.register_print(fn_writer)?;
 
             // Initialize the sandbox.
@@ -83,6 +84,7 @@ fn main() -> Result<()> {
     // Create a new sandbox.
     let usandbox = UninitializedSandbox::new(
         GuestBinary::FilePath(hyperlight_guest_path.clone()),
+        None,
         None,
         None,
     )?;

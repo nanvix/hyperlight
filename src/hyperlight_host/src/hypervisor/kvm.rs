@@ -281,6 +281,8 @@ pub(super) struct KVMDriver {
     _vm_fd: VmFd,
     vcpu_fd: VcpuFd,
     entrypoint: u64,
+    initrd_addr: u64,
+    initrd_size: usize,
     orig_rsp: GuestPtr,
     mem_regions: Vec<MemoryRegion>,
 
@@ -299,6 +301,8 @@ impl KVMDriver {
         mem_regions: Vec<MemoryRegion>,
         pml4_addr: u64,
         entrypoint: u64,
+        initrd_addr: u64,
+        initrd_size: usize,
         rsp: u64,
         #[cfg(gdb)] gdb_conn: Option<DebugCommChannel<DebugResponse, DebugMsg>>,
     ) -> Result<Self> {
@@ -345,6 +349,8 @@ impl KVMDriver {
             _vm_fd: vm_fd,
             vcpu_fd,
             entrypoint,
+            initrd_addr,
+            initrd_size,
             orig_rsp: rsp_gp,
             mem_regions,
 
@@ -425,9 +431,31 @@ impl Hypervisor for KVMDriver {
             None => self.get_max_log_level().into(),
         };
 
+        let nzeros: usize = 12; // TODO: change this to INITRD_BASE.trailing_zeros()
+        let max_initrd_size: usize = (1 << 12) * ((1 << nzeros) - 1);
+        if self.initrd_size > max_initrd_size {
+            return Err(new_error!(
+                "initrd is too large (initrd_size={}, max_initrd_size={:?})",
+                self.initrd_size,
+                max_initrd_size
+            ));
+        }
+
+        // Encode initrd location and size:
+        // - Lower 12 bits encode the size in 4KB pages
+        // - Higher bits encode the base address
+        let (initrd_base, initrd_size): (u64, u64) = (self.initrd_addr, self.initrd_size as u64);
+        let rbx: u64 =
+            (initrd_base & !((1 << nzeros) - 1)) | ((initrd_size >> 12) & ((1 << nzeros) - 1));
+
         let regs = kvm_regs {
             rip: self.entrypoint,
             rsp: self.orig_rsp.absolute()?,
+
+            // Kernel args.
+            rax: 0x0c00ffee, // Magic Value for Hyperlight Bootloader
+            rbx,             // Initrd location
+            rflags: 2,       // Always set to 2
 
             // function args
             rcx: peb_addr.into(),

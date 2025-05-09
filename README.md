@@ -42,6 +42,7 @@ fn main() -> hyperlight_host::Result<()> {
     // Create an uninitialized sandbox with a guest binary
     let mut uninitialized_sandbox = UninitializedSandbox::new(
         hyperlight_host::GuestBinary::FilePath(hyperlight_testing::simple_guest_as_string().unwrap()),
+        None,
         None, // default configuration
         None, // default run options
     )?;

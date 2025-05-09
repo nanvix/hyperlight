@@ -71,7 +71,8 @@ fn run_example() -> Result<()> {
             let _entered = span.enter();
 
             // Create a new sandbox.
-            let mut usandbox = UninitializedSandbox::new(GuestBinary::FilePath(path), None, None)?;
+            let mut usandbox =
+                UninitializedSandbox::new(GuestBinary::FilePath(path), None, None, None)?;
             usandbox.register_print(fn_writer)?;
 
             // Initialize the sandbox.
@@ -111,6 +112,7 @@ fn run_example() -> Result<()> {
     // Create a new sandbox.
     let usandbox = UninitializedSandbox::new(
         GuestBinary::FilePath(hyperlight_guest_path.clone()),
+        None,
         None,
         None,
     )?;
