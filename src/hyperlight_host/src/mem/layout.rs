@@ -16,7 +16,9 @@ limitations under the License.
 use std::fmt::Debug;
 use std::mem::{offset_of, size_of};
 
-use hyperlight_common::mem::{GuestStackData, HyperlightPEB, RunMode, PAGE_SIZE_USIZE};
+use hyperlight_common::mem::{
+    GuestStackData, HyperlightPEB, RunMode, PAGE_SIZE_USIZE, PAGE_TABLE_SIZE_USIZE,
+};
 use rand::{rng, RngCore};
 use tracing::{instrument, Span};
 
@@ -271,10 +273,10 @@ impl SandboxMemoryLayout {
             input_data_buffer_offset + cfg.get_input_data_size(),
             PAGE_SIZE_USIZE,
         );
-        // make sure heap buffer starts at 4K boundary
+        // make sure heap buffer starts at 4MB boundary
         let guest_heap_buffer_offset = round_up_to(
             output_data_buffer_offset + cfg.get_output_data_size(),
-            PAGE_SIZE_USIZE,
+            PAGE_TABLE_SIZE_USIZE,
         );
         // make sure guard page starts at 4K boundary
         let guard_page_offset = round_up_to(guest_heap_buffer_offset + heap_size, PAGE_SIZE_USIZE);
@@ -623,10 +625,18 @@ impl SandboxMemoryLayout {
         }
 
         // guest output data
-        let heap_offset = builder.push_page_aligned(
+        let heap_guard_offset = builder.push_page_aligned(
             self.sandbox_memory_config.get_output_data_size(),
             MemoryRegionFlags::READ | MemoryRegionFlags::WRITE,
             OutputData,
+        );
+
+        let heap_guard_size = self.guest_heap_buffer_offset - heap_guard_offset;
+
+        let heap_offset = builder.push_page_aligned(
+            heap_guard_size,
+            MemoryRegionFlags::READ | MemoryRegionFlags::STACK_GUARD,
+            GuardPage,
         );
 
         let expected_heap_offset = TryInto::<usize>::try_into(self.guest_heap_buffer_offset)?;
