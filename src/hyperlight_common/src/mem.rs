@@ -14,8 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-#![allow(non_snake_case)]
-
 pub const PAGE_SHIFT: u64 = 12;
 pub const PAGE_SIZE: u64 = 1 << 12;
 pub const PAGE_SIZE_USIZE: usize = 1 << 12;
@@ -25,31 +23,31 @@ pub const PAGE_TABLE_SIZE_USIZE: usize = 1 << 22;
 #[derive(Debug, Clone, Copy)]
 #[repr(C, packed)]
 pub struct InputData {
-    pub inputDataSize: u64,
-    pub inputDataBuffer: u64,
+    pub size: u64,
+    pub ptr: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
 #[repr(C, packed)]
 pub struct OutputData {
-    pub outputDataSize: u64,
-    pub outputDataBuffer: u64,
+    pub size: u64,
+    pub ptr: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
 #[repr(C, packed)]
 pub struct GuestHeapData {
-    pub guestHeapSize: u64,
-    pub guestHeapBuffer: u64,
+    pub size: u64,
+    pub ptr: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
 #[repr(C, packed)]
 pub struct GuestStackData {
     /// This is the top of the user stack
-    pub minUserStackAddress: u64,
+    pub min_user_stack_ptr: u64,
     /// This is the user stack pointer
-    pub userStackAddress: u64,
+    pub user_stack_ptr: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -57,9 +55,9 @@ pub struct GuestStackData {
 pub struct HyperlightPEB {
     pub security_cookie_seed: u64,
     pub guest_function_dispatch_ptr: u64,
-    pub pCode: u64,
-    pub inputdata: InputData,
-    pub outputdata: OutputData,
-    pub guestheapData: GuestHeapData,
-    pub gueststackData: GuestStackData,
+    pub code_ptr: u64,
+    pub input_data: InputData,
+    pub output_data: OutputData,
+    pub guest_heap_data: GuestHeapData,
+    pub guest_stack_data: GuestStackData,
 }

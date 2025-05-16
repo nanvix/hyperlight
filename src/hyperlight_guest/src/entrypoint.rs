@@ -98,7 +98,7 @@ pub extern "C" fn entrypoint(peb_address: u64, seed: u64, ops: u64, max_log_leve
             // This static is to make it easier to implement the __chkstk function in assembly.
             // It also means that should we change the layout of the struct in the future, we
             // don't have to change the assembly code.
-            MIN_STACK_ADDRESS = (*peb_ptr).gueststackData.minUserStackAddress;
+            MIN_STACK_ADDRESS = (*peb_ptr).guest_stack_data.min_user_stack_ptr;
 
             #[cfg(target_arch = "x86_64")]
             {
@@ -107,8 +107,8 @@ pub extern "C" fn entrypoint(peb_address: u64, seed: u64, ops: u64, max_log_leve
                 load_idt();
             }
 
-            let heap_start = (*peb_ptr).guestheapData.guestHeapBuffer as usize;
-            let heap_size = (*peb_ptr).guestheapData.guestHeapSize as usize;
+            let heap_start = (*peb_ptr).guest_heap_data.ptr as usize;
+            let heap_size = (*peb_ptr).guest_heap_data.size as usize;
             HEAP_ALLOCATOR
                 .try_lock()
                 .expect("Failed to access HEAP_ALLOCATOR")

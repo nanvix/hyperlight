@@ -30,14 +30,10 @@ where
     T: for<'a> TryFrom<&'a [u8]>,
 {
     let peb_ptr = unsafe { P_PEB.unwrap() };
-    let shared_buffer_size = unsafe { (*peb_ptr).inputdata.inputDataSize as usize };
+    let shared_buffer_size = unsafe { (*peb_ptr).input_data.size as usize };
 
-    let idb = unsafe {
-        from_raw_parts_mut(
-            (*peb_ptr).inputdata.inputDataBuffer as *mut u8,
-            shared_buffer_size,
-        )
-    };
+    let idb =
+        unsafe { from_raw_parts_mut((*peb_ptr).input_data.ptr as *mut u8, shared_buffer_size) };
 
     if idb.is_empty() {
         return Err(HyperlightGuestError::new(
