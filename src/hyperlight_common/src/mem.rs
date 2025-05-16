@@ -22,25 +22,25 @@ pub const PAGE_SIZE_USIZE: usize = 1 << 12;
 pub const PAGE_TABLE_SHIFT: u64 = 22;
 pub const PAGE_TABLE_SIZE_USIZE: usize = 1 << 22;
 
-#[repr(C)]
+#[repr(C, packed)]
 pub struct InputData {
     pub inputDataSize: u64,
     pub inputDataBuffer: u64,
 }
 
-#[repr(C)]
+#[repr(C, packed)]
 pub struct OutputData {
     pub outputDataSize: u64,
     pub outputDataBuffer: u64,
 }
 
-#[repr(C)]
+#[repr(C, packed)]
 pub struct GuestHeapData {
     pub guestHeapSize: u64,
     pub guestHeapBuffer: u64,
 }
 
-#[repr(C)]
+#[repr(C, packed)]
 pub struct GuestStackData {
     /// This is the top of the user stack
     pub minUserStackAddress: u64,
@@ -48,7 +48,7 @@ pub struct GuestStackData {
     pub userStackAddress: u64,
 }
 
-#[repr(C)]
+#[repr(C, packed)]
 pub struct HyperlightPEB {
     pub security_cookie_seed: u64,
     pub guest_function_dispatch_ptr: u64,
