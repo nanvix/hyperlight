@@ -43,10 +43,10 @@ where
     }
 
     // get relative offset to next free address
-    let stack_ptr_rel: usize =
-        usize::from_le_bytes(idb[..8].try_into().expect("Shared input buffer too small"));
+    let stack_ptr_rel: u64 =
+        u64::from_le_bytes(idb[..8].try_into().expect("Shared input buffer too small"));
 
-    if stack_ptr_rel > shared_buffer_size || stack_ptr_rel < 16 {
+    if stack_ptr_rel as usize > shared_buffer_size || stack_ptr_rel < 16 {
         return Err(HyperlightGuestError::new(
             ErrorCode::GuestError,
             format!(
@@ -57,13 +57,13 @@ where
     }
 
     // go back 8 bytes and read. This is the offset to the element on top of stack
-    let last_element_offset_rel = usize::from_le_bytes(
-        idb[stack_ptr_rel - 8..stack_ptr_rel]
+    let last_element_offset_rel = u64::from_le_bytes(
+        idb[stack_ptr_rel as usize - 8..stack_ptr_rel as usize]
             .try_into()
             .expect("Invalid stack pointer in pop_shared_input_data_into"),
     );
 
-    let buffer = &idb[last_element_offset_rel..];
+    let buffer = &idb[last_element_offset_rel as usize..];
 
     // convert the buffer to T
     let type_t = match T::try_from(buffer) {
@@ -80,7 +80,7 @@ where
     idb[..8].copy_from_slice(&last_element_offset_rel.to_le_bytes());
 
     // zero out popped off buffer
-    idb[last_element_offset_rel..stack_ptr_rel].fill(0);
+    idb[last_element_offset_rel as usize..stack_ptr_rel as usize].fill(0);
 
     type_t
 }
