@@ -73,7 +73,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 #[global_allocator]
 pub(crate) static HEAP_ALLOCATOR: LockedHeap<32> = LockedHeap::<32>::empty();
 
-pub(crate) static mut P_PEB: Option<*mut HyperlightPEB> = None;
+pub static mut P_PEB: Option<*mut HyperlightPEB> = None;
 pub static mut MIN_STACK_ADDRESS: u64 = 0;
 
 pub static mut OS_PAGE_SIZE: u32 = 0;
