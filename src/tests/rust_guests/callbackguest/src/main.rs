@@ -20,6 +20,22 @@ limitations under the License.
 extern crate alloc;
 extern crate hyperlight_guest;
 
+// It looks like rust-analyzer doesn't correctly manage no_std crates,
+// and so it displays an error about a duplicate panic_handler.
+// See more here: https://github.com/rust-lang/rust-analyzer/issues/4490
+// The cfg_attr attribute is used to avoid clippy failures as test pulls in std which pulls in a panic handler
+#[cfg_attr(not(test), panic_handler)]
+#[allow(clippy::panic)]
+// to satisfy the clippy when cfg == test
+#[allow(dead_code)]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    let msg = info.to_string();
+    let c_string = alloc::ffi::CString::new(msg)
+        .unwrap_or_else(|_| alloc::ffi::CString::new("panic (invalid utf8)").unwrap());
+
+    unsafe { abort_with_code_and_message(&[ErrorCode::UnknownError as u8], c_string.as_ptr()) }
+}
+
 use alloc::format;
 use alloc::string::ToString;
 use alloc::vec::Vec;
@@ -31,6 +47,7 @@ use hyperlight_common::flatbuffer_wrappers::function_types::{
 use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
 use hyperlight_common::flatbuffer_wrappers::guest_log_level::LogLevel;
 use hyperlight_common::flatbuffer_wrappers::util::get_flatbuffer_result;
+use hyperlight_guest::entrypoint::abort_with_code_and_message;
 use hyperlight_guest::error::{HyperlightGuestError, Result};
 use hyperlight_guest::guest_function_definition::GuestFunctionDefinition;
 use hyperlight_guest::guest_function_register::register_function;

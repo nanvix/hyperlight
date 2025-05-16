@@ -16,14 +16,11 @@ limitations under the License.
 
 #![no_std]
 // Deps
-use alloc::string::ToString;
 
 use buddy_system_allocator::LockedHeap;
 use guest_function_register::GuestFunctionRegister;
-use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
 use hyperlight_common::mem::HyperlightPEB;
 
-use crate::entrypoint::abort_with_code_and_message;
 extern crate alloc;
 
 // Modules
@@ -52,22 +49,6 @@ pub mod exceptions {
     pub mod interrupt_entry;
 }
 pub mod logging;
-
-// It looks like rust-analyzer doesn't correctly manage no_std crates,
-// and so it displays an error about a duplicate panic_handler.
-// See more here: https://github.com/rust-lang/rust-analyzer/issues/4490
-// The cfg_attr attribute is used to avoid clippy failures as test pulls in std which pulls in a panic handler
-#[cfg_attr(not(test), panic_handler)]
-#[allow(clippy::panic)]
-// to satisfy the clippy when cfg == test
-#[allow(dead_code)]
-fn panic(info: &core::panic::PanicInfo) -> ! {
-    let msg = info.to_string();
-    let c_string = alloc::ffi::CString::new(msg)
-        .unwrap_or_else(|_| alloc::ffi::CString::new("panic (invalid utf8)").unwrap());
-
-    unsafe { abort_with_code_and_message(&[ErrorCode::UnknownError as u8], c_string.as_ptr()) }
-}
 
 // Globals
 #[global_allocator]
