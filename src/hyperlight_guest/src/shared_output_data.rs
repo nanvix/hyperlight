@@ -26,13 +26,9 @@ use crate::P_PEB;
 
 pub fn push_shared_output_data(data: Vec<u8>) -> Result<()> {
     let peb_ptr = unsafe { P_PEB.unwrap() };
-    let shared_buffer_size = unsafe { (*peb_ptr).outputdata.outputDataSize as usize };
-    let odb = unsafe {
-        from_raw_parts_mut(
-            (*peb_ptr).outputdata.outputDataBuffer as *mut u8,
-            shared_buffer_size,
-        )
-    };
+    let shared_buffer_size = unsafe { (*peb_ptr).output_data.size as usize };
+    let odb =
+        unsafe { from_raw_parts_mut((*peb_ptr).output_data.ptr as *mut u8, shared_buffer_size) };
 
     if odb.is_empty() {
         return Err(HyperlightGuestError::new(

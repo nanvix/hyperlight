@@ -254,11 +254,11 @@ impl SandboxMemoryLayout {
             peb_offset + offset_of!(HyperlightPEB, security_cookie_seed);
         let peb_guest_dispatch_function_ptr_offset =
             peb_offset + offset_of!(HyperlightPEB, guest_function_dispatch_ptr);
-        let peb_code_pointer_offset = peb_offset + offset_of!(HyperlightPEB, pCode);
-        let peb_input_data_offset = peb_offset + offset_of!(HyperlightPEB, inputdata);
-        let peb_output_data_offset = peb_offset + offset_of!(HyperlightPEB, outputdata);
-        let peb_heap_data_offset = peb_offset + offset_of!(HyperlightPEB, guestheapData);
-        let peb_guest_stack_data_offset = peb_offset + offset_of!(HyperlightPEB, gueststackData);
+        let peb_code_pointer_offset = peb_offset + offset_of!(HyperlightPEB, code_ptr);
+        let peb_input_data_offset = peb_offset + offset_of!(HyperlightPEB, input_data);
+        let peb_output_data_offset = peb_offset + offset_of!(HyperlightPEB, output_data);
+        let peb_heap_data_offset = peb_offset + offset_of!(HyperlightPEB, guest_heap_data);
+        let peb_guest_stack_data_offset = peb_offset + offset_of!(HyperlightPEB, guest_stack_data);
 
         // The following offsets are the actual values that relate to memory layout,
         // which are written to PEB struct
