@@ -20,8 +20,7 @@ use core::ffi::{c_char, CStr};
 use core::mem;
 
 use hyperlight_common::flatbuffer_wrappers::function_types::{ParameterValue, ReturnType};
-
-use crate::host_function_call::call_host_function;
+use hyperlight_guest::host_function_call::call_host_function;
 
 const BUFFER_SIZE: usize = 1000;
 

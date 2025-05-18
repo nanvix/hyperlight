@@ -20,17 +20,19 @@ use alloc::vec::Vec;
 use hyperlight_common::flatbuffer_wrappers::function_call::{FunctionCall, FunctionCallType};
 use hyperlight_common::flatbuffer_wrappers::function_types::ParameterType;
 use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
+use hyperlight_guest::error::{HyperlightGuestError, Result};
+use hyperlight_guest::out::halt;
+use hyperlight_guest::shared_input_data::try_pop_shared_input_data_into;
+use hyperlight_guest::shared_output_data::push_shared_output_data;
 
-use crate::entrypoint::halt;
-use crate::error::{HyperlightGuestError, Result};
 use crate::guest_error::set_error;
-use crate::shared_input_data::try_pop_shared_input_data_into;
-use crate::shared_output_data::push_shared_output_data;
 use crate::REGISTERED_GUEST_FUNCTIONS;
+
+extern crate alloc;
 
 type GuestFunc = fn(&FunctionCall) -> Result<Vec<u8>>;
 
-pub(crate) fn call_guest_function(function_call: FunctionCall) -> Result<Vec<u8>> {
+fn call_guest_function(function_call: FunctionCall) -> Result<Vec<u8>> {
     // Validate this is a Guest Function Call
     if function_call.function_call_type() != FunctionCallType::Guest {
         return Err(HyperlightGuestError::new(
@@ -88,7 +90,7 @@ fn internal_dispatch_function() -> Result<()> {
         .expect("Function call deserialization failed");
 
     let result_vec = call_guest_function(function_call).inspect_err(|e| {
-        set_error(e.kind.clone(), e.message.as_str());
+        set_error(e.kind, e.message.as_str());
     })?;
 
     push_shared_output_data(result_vec)

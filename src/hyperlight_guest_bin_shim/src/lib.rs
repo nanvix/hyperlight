@@ -13,58 +13,69 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
+#![no_std]
 
-use core::arch::asm;
-use core::ffi::{c_char, CStr};
+use alloc::string::ToString;
 
+use buddy_system_allocator::LockedHeap;
+use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
 use hyperlight_common::mem::HyperlightPEB;
-use hyperlight_common::outb::OutBAction;
+use hyperlight_guest::out::{abort_with_code_and_message, halt};
+use hyperlight_guest::P_PEB;
 use log::LevelFilter;
 use spin::Once;
 
+use crate::exceptions::gdt::load_gdt;
+use crate::exceptions::idtr::load_idt;
+use crate::guest_function::call::dispatch_function;
+use crate::guest_function::register::GuestFunctionRegister;
+use crate::guest_log::logger::init_logger;
+
+extern crate alloc;
+
+pub static mut MIN_STACK_ADDRESS: u64 = 0;
+static mut REGISTERED_GUEST_FUNCTIONS: GuestFunctionRegister = GuestFunctionRegister::new();
+static mut OS_PAGE_SIZE: u32 = 0;
+
 #[cfg(target_arch = "x86_64")]
-use crate::exceptions::{gdt::load_gdt, idtr::load_idt};
-use crate::guest_function_call::dispatch_function;
-use crate::guest_logger::init_logger;
-use crate::host_function_call::outb;
-use crate::{HEAP_ALLOCATOR, MIN_STACK_ADDRESS, OS_PAGE_SIZE, P_PEB};
+mod exceptions {
+    pub(super) mod gdt;
+    mod handler;
+    mod idt;
+    pub(super) mod idtr;
+    mod interrupt_entry;
+}
+pub mod guest_error;
+pub mod guest_function {
+    pub(super) mod call;
+    pub mod definition;
+    pub mod register;
+}
+pub mod guest_log {
+    pub(super) mod logger;
+    pub mod logging;
+}
+pub mod memory;
+pub mod print;
 
-#[inline(never)]
-pub fn halt() {
-    unsafe { asm!("hlt", options(nostack)) }
+// It looks like rust-analyzer doesn't correctly manage no_std crates,
+// and so it displays an error about a duplicate panic_handler.
+// See more here: https://github.com/rust-lang/rust-analyzer/issues/4490
+// The cfg_attr attribute is used to avoid clippy failures as test pulls in std which pulls in a panic handler
+#[cfg_attr(not(test), panic_handler)]
+#[allow(clippy::panic)]
+// to satisfy the clippy when cfg == test
+#[allow(dead_code)]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    let msg = info.to_string();
+    let c_string = alloc::ffi::CString::new(msg)
+        .unwrap_or_else(|_| alloc::ffi::CString::new("panic (invalid utf8)").unwrap());
+
+    unsafe { abort_with_code_and_message(&[ErrorCode::UnknownError as u8], c_string.as_ptr()) }
 }
 
-#[no_mangle]
-pub extern "C" fn abort() -> ! {
-    abort_with_code(&[0, 0xFF])
-}
-
-pub fn abort_with_code(code: &[u8]) -> ! {
-    outb(OutBAction::Abort as u16, code);
-    outb(OutBAction::Abort as u16, &[0xFF]); // send abort terminator (if not included in code)
-    unreachable!()
-}
-
-/// Aborts the program with a code and a message.
-///
-/// # Safety
-/// This function is unsafe because it dereferences a raw pointer.
-pub unsafe fn abort_with_code_and_message(code: &[u8], message_ptr: *const c_char) -> ! {
-    // Step 1: Send abort code (typically 1 byte, but `code` allows flexibility)
-    outb(OutBAction::Abort as u16, code);
-
-    // Step 2: Convert the C string to bytes
-    let message_bytes = CStr::from_ptr(message_ptr).to_bytes(); // excludes null terminator
-
-    // Step 3: Send the message itself in chunks
-    outb(OutBAction::Abort as u16, message_bytes);
-
-    // Step 4: Send abort terminator to signal completion (e.g., 0xFF)
-    outb(OutBAction::Abort as u16, &[0xFF]);
-
-    // This function never returns
-    unreachable!()
-}
+#[global_allocator]
+static HEAP_ALLOCATOR: LockedHeap<32> = LockedHeap::<32>::empty();
 
 extern "C" {
     fn hyperlight_main();
@@ -74,7 +85,7 @@ extern "C" {
 static INIT: Once = Once::new();
 
 #[no_mangle]
-pub extern "C" fn entrypoint(peb_address: u64, seed: u64, ops: u64, max_log_level: u64) {
+extern "C" fn entrypoint(peb_address: u64, seed: u64, ops: u64, max_log_level: u64) {
     if peb_address == 0 {
         panic!("PEB address is null");
     }

@@ -146,10 +146,10 @@ the [./src/tests/rust_guests](./src/tests/rust_guests) directory for Rust guests
 - Hyperlight Host Libraries (i.e., the ones that create and manage the VMs)
     - [src/hyperlight_host](./src/hyperlight_host) - This is the Rust Hyperlight host library.
 
-- Hyperlight Guest Libraries (i.e., the ones to make it easier to create guests that run inside the VMs)
-    - [src/hyperlight_guest](./src/hyperlight_guest) - This is the Rust Hyperlight guest library.
-    - [src/hyperlight_guest_capi](./src/hyperlight_guest_capi) - This is the C compatible wrapper for the Hyperlight
-      guest library.
+- Hyperlight Guest Libraries (i.e., libraries that help build guests that run inside Hyperlight-backed VMs)
+    - [src/hyperlight_guest](./src/hyperlight_guest) - The core Rust library for Hyperlight guests. It provides only the essential building blocks for interacting with the host environment, including the VM exit mechanism (`outb`), abstractions for calling host functions and receiving return values, and the input/output stacks used for guest-host communication.
+    - [src/hyperlight_guest_bin_shim](./src/hyperlight_guest_bin_shim/) - A minimal shim that allows using `hyperlight_guest` without adopting its more opinionated components (e.g., panic handler, heap initialization, musl-specific imports, logging, and exception handling).
+    - [src/hyperlight_guest_capi](./src/hyperlight_guest_capi) - A C-compatible wrapper around `hyperlight_guest_bin_shim`, exposing its core functionality for use in C programs and other languages via FFI.
 
 - Hyperlight Common (functionality used by both the host and the guest)
     - [src/hyperlight_common](./src/hyperlight_common)

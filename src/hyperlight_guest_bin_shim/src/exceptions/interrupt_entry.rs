@@ -19,32 +19,32 @@ limitations under the License.
 
 use core::arch::global_asm;
 
-use crate::exceptions::handlers::hl_exception_handler;
+use crate::exceptions::handler::hl_exception_handler;
 
 extern "C" {
     // Exception handlers
-    pub(crate) fn _do_excp0();
-    pub(crate) fn _do_excp1();
-    pub(crate) fn _do_excp2();
-    pub(crate) fn _do_excp3();
-    pub(crate) fn _do_excp4();
-    pub(crate) fn _do_excp5();
-    pub(crate) fn _do_excp6();
-    pub(crate) fn _do_excp7();
-    pub(crate) fn _do_excp8();
-    pub(crate) fn _do_excp9();
-    pub(crate) fn _do_excp10();
-    pub(crate) fn _do_excp11();
-    pub(crate) fn _do_excp12();
-    pub(crate) fn _do_excp13();
-    pub(crate) fn _do_excp14();
-    pub(crate) fn _do_excp15();
-    pub(crate) fn _do_excp16();
-    pub(crate) fn _do_excp17();
-    pub(crate) fn _do_excp18();
-    pub(crate) fn _do_excp19();
-    pub(crate) fn _do_excp20();
-    pub(crate) fn _do_excp30();
+    pub(super) fn _do_excp0();
+    pub(super) fn _do_excp1();
+    pub(super) fn _do_excp2();
+    pub(super) fn _do_excp3();
+    pub(super) fn _do_excp4();
+    pub(super) fn _do_excp5();
+    pub(super) fn _do_excp6();
+    pub(super) fn _do_excp7();
+    pub(super) fn _do_excp8();
+    pub(super) fn _do_excp9();
+    pub(super) fn _do_excp10();
+    pub(super) fn _do_excp11();
+    pub(super) fn _do_excp12();
+    pub(super) fn _do_excp13();
+    pub(super) fn _do_excp14();
+    pub(super) fn _do_excp15();
+    pub(super) fn _do_excp16();
+    pub(super) fn _do_excp17();
+    pub(super) fn _do_excp18();
+    pub(super) fn _do_excp19();
+    pub(super) fn _do_excp20();
+    pub(super) fn _do_excp30();
 }
 
 // Defines `context_save` and `context_restore`

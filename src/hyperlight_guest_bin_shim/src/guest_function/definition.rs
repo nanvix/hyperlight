@@ -20,18 +20,17 @@ use alloc::vec::Vec;
 
 use hyperlight_common::flatbuffer_wrappers::function_types::{ParameterType, ReturnType};
 use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
-
-use crate::error::{HyperlightGuestError, Result};
+use hyperlight_guest::error::{HyperlightGuestError, Result};
 
 /// The definition of a function exposed from the guest to the host
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuestFunctionDefinition {
     /// The function name
-    pub function_name: String,
+    pub(super) function_name: String,
     /// The type of the parameter values for the host function call.
-    pub parameter_types: Vec<ParameterType>,
+    parameter_types: Vec<ParameterType>,
     /// The type of the return value from the host function call
-    pub return_type: ReturnType,
+    return_type: ReturnType,
     /// The function pointer to the guest function
     pub function_pointer: usize,
 }

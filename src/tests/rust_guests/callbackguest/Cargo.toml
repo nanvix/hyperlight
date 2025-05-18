@@ -4,5 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+hyperlight-guest-bin-shim = { path = "../../../hyperlight_guest_bin_shim" }
 hyperlight-guest = { path = "../../../hyperlight_guest" }
 hyperlight-common = { path = "../../../hyperlight_common", default-features = false }

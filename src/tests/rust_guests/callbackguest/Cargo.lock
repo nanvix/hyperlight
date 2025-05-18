@@ -35,6 +35,7 @@ version = "0.1.0"
 dependencies = [
  "hyperlight-common",
  "hyperlight-guest",
+ "hyperlight-guest-bin-shim",
 ]
 
 [[package]]
@@ -89,13 +90,21 @@ name = "hyperlight-guest"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "hyperlight-common",
+ "serde_json",
+]
+
+[[package]]
+name = "hyperlight-guest-bin-shim"
+version = "0.4.0"
+dependencies = [
  "buddy_system_allocator",
  "cc",
  "cfg-if",
  "glob",
  "hyperlight-common",
+ "hyperlight-guest",
  "log",
- "serde_json",
  "spin 0.10.0",
 ]
 

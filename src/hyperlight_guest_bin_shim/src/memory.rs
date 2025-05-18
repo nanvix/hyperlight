@@ -20,8 +20,7 @@ use core::mem::{align_of, size_of};
 use core::ptr;
 
 use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
-
-use crate::entrypoint::abort_with_code;
+use hyperlight_guest::out::abort_with_code;
 
 extern crate alloc;
 

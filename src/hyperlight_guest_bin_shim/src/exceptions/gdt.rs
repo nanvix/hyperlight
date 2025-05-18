@@ -29,7 +29,7 @@ use core::ptr::addr_of;
 /// - p d/b l avl seg. limit 23..16 = flags_limit
 /// - base 31..24 = base_high
 #[repr(C, align(8))]
-pub struct GdtEntry {
+struct GdtEntry {
     limit_low: u16,
     base_low: u16,
     base_middle: u8,
@@ -40,7 +40,7 @@ pub struct GdtEntry {
 
 impl GdtEntry {
     /// Creates a new GDT entry.
-    pub const fn new(base: u32, limit: u32, access: u8, flags: u8) -> Self {
+    const fn new(base: u32, limit: u32, access: u8, flags: u8) -> Self {
         Self {
             base_low: (base & 0xffff) as u16,
             base_middle: ((base >> 16) & 0xff) as u8,
@@ -72,7 +72,7 @@ struct GdtPointer {
 }
 
 /// Load the GDT
-pub unsafe fn load_gdt() {
+pub(crate) unsafe fn load_gdt() {
     let gdt_ptr = GdtPointer {
         size: (core::mem::size_of::<[GdtEntry; 3]>() - 1) as u16,
         base: addr_of!(GDT) as *const _ as u64,

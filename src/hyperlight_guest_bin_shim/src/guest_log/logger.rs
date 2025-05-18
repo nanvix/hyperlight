@@ -18,7 +18,7 @@ use alloc::format;
 
 use log::{LevelFilter, Metadata, Record};
 
-use crate::logging::log_message;
+use crate::guest_log::logging::log_message;
 
 // this is private on purpose so that `log` can only be called though the `log!` macros.
 struct GuestLogger {}

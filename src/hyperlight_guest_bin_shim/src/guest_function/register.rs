@@ -17,7 +17,7 @@ limitations under the License.
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 
-use super::guest_function_definition::GuestFunctionDefinition;
+use crate::guest_function::definition::GuestFunctionDefinition;
 use crate::REGISTERED_GUEST_FUNCTIONS;
 
 /// Represents the functions that the guest exposes to the host.

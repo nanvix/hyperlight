@@ -35,7 +35,7 @@ use crate::exceptions::interrupt_entry::{
 // - offset 63..32 = offset_high
 // - reserved 31..0 = zero
 #[repr(C, align(16))]
-pub(crate) struct IdtEntry {
+pub(super) struct IdtEntry {
     offset_low: u16,                  // Lower 16 bits of handler address
     selector: u16,                    // code segment selector in GDT
     interrupt_stack_table_offset: u8, // Interrupt Stack Table offset
@@ -69,9 +69,9 @@ impl IdtEntry {
 // The IDT is an array of 256 IDT entries
 // (for reference, see page 7-9 Vol. 3A of Intel 64 and IA-32
 // Architectures Software Developer's Manual).
-pub(crate) static mut IDT: [IdtEntry; 256] = unsafe { core::mem::zeroed() };
+pub(super) static mut IDT: [IdtEntry; 256] = unsafe { core::mem::zeroed() };
 
-pub(crate) fn init_idt() {
+pub(super) fn init_idt() {
     set_idt_entry(Exception::DivideByZero as usize, _do_excp0); // Divide by zero
     set_idt_entry(Exception::Debug as usize, _do_excp1); // Debug
     set_idt_entry(Exception::NonMaskableInterrupt as usize, _do_excp2); // Non-maskable interrupt

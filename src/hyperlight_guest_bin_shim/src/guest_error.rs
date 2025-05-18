@@ -19,13 +19,12 @@ use alloc::vec::Vec;
 use core::ffi::{c_char, CStr};
 
 use hyperlight_common::flatbuffer_wrappers::guest_error::{ErrorCode, GuestError};
+use hyperlight_guest::out::halt;
+use hyperlight_guest::shared_output_data::push_shared_output_data;
 
-use crate::entrypoint::halt;
-use crate::shared_output_data::push_shared_output_data;
-
-pub(crate) fn write_error(error_code: ErrorCode, message: Option<&str>) {
+fn write_error(error_code: ErrorCode, message: Option<&str>) {
     let guest_error = GuestError::new(
-        error_code.clone(),
+        error_code,
         message.map_or("".to_string(), |m| m.to_string()),
     );
     let guest_error_buffer: Vec<u8> = (&guest_error)
@@ -36,7 +35,7 @@ pub(crate) fn write_error(error_code: ErrorCode, message: Option<&str>) {
         .expect("Unable to push guest error to shared output data");
 }
 
-pub(crate) fn set_error(error_code: ErrorCode, message: &str) {
+pub(super) fn set_error(error_code: ErrorCode, message: &str) {
     write_error(error_code, Some(message));
 }
 

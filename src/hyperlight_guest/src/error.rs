@@ -22,12 +22,14 @@ use {anyhow, serde_json};
 
 pub type Result<T> = core::result::Result<T, HyperlightGuestError>;
 
+/// Represents an error that can occur in the Hyperlight guest environment.
 #[derive(Debug)]
 pub struct HyperlightGuestError {
     pub kind: ErrorCode,
     pub message: String,
 }
 
+/// Creates a new `HyperlightGuestError` with the specified error code and message.
 impl HyperlightGuestError {
     pub fn new(kind: ErrorCode, message: String) -> Self {
         Self { kind, message }
