@@ -19,7 +19,7 @@ use std::sync::OnceLock;
 
 #[cfg(mshv)]
 use crate::hypervisor::hyperv_linux;
-#[cfg(kvm)]
+#[cfg(feature = "kvm")]
 use crate::hypervisor::kvm;
 
 static AVAILABLE_HYPERVISOR: OnceLock<Option<HypervisorType>> = OnceLock::new();
@@ -38,7 +38,7 @@ pub fn get_available_hypervisor() -> &'static Option<HypervisorType> {
                 } else {
                     None
                 }
-            } else if #[cfg(kvm)] {
+            } else if #[cfg(feature = "kvm")] {
                 if kvm::is_hypervisor_present() {
                     Some(HypervisorType::Kvm)
                 } else {
@@ -68,7 +68,7 @@ pub fn get_available_hypervisor() -> &'static Option<HypervisorType> {
 /// The hypervisor types available for the current platform
 #[derive(PartialEq, Eq, Debug)]
 pub(crate) enum HypervisorType {
-    #[cfg(kvm)]
+    #[cfg(feature = "kvm")]
     Kvm,
 
     #[cfg(mshv)]

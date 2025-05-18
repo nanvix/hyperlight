@@ -152,7 +152,7 @@ pub enum HyperlightError {
 
     /// Error occurred in KVM Operation
     #[error("KVM Error {0:?}")]
-    #[cfg(kvm)]
+    #[cfg(feature = "kvm")]
     KVMError(#[from] kvm_ioctls::Error),
 
     /// An attempt to get a lock from a Mutex failed.

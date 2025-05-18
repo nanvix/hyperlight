@@ -902,7 +902,7 @@ fn set_up_hypervisor_partition(
             Ok(Box::new(hv))
         }
 
-        #[cfg(kvm)]
+        #[cfg(feature = "kvm")]
         Some(HypervisorType::Kvm) => {
             let hv = crate::hypervisor::kvm::KVMDriver::new(
                 regions,

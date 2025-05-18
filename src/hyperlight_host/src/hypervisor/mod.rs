@@ -39,7 +39,7 @@ pub(crate) mod hypervisor_handler;
 #[cfg(feature = "gdb")]
 mod gdb;
 
-#[cfg(kvm)]
+#[cfg(feature = "kvm")]
 /// Functionality to manipulate KVM-based virtual machines
 pub mod kvm;
 #[cfg(target_os = "windows")]

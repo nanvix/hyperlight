@@ -117,7 +117,7 @@ mod tests {
         cfg_if::cfg_if! {
             if #[cfg(all(kvm, mshv))] {
                 assert_eq!(Path::new("/dev/kvm").exists() || Path::new("/dev/mshv").exists(), super::is_hypervisor_present());
-            } else if #[cfg(kvm)] {
+            } else if #[cfg(feature = "kvm")] {
                 assert_eq!(Path::new("/dev/kvm").exists(), super::is_hypervisor_present());
             } else if #[cfg(mshv)] {
                 assert_eq!(Path::new("/dev/mshv").exists(), super::is_hypervisor_present());

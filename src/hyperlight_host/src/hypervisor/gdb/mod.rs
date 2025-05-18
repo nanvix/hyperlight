@@ -16,7 +16,7 @@ limitations under the License.
 
 mod arch;
 mod event_loop;
-#[cfg(kvm)]
+#[cfg(feature = "kvm")]
 mod kvm_debug;
 #[cfg(mshv)]
 mod mshv_debug;
@@ -34,7 +34,7 @@ use gdbstub::conn::ConnectionExt;
 use gdbstub::stub::GdbStub;
 use gdbstub::target::TargetError;
 use hyperlight_common::mem::PAGE_SIZE;
-#[cfg(kvm)]
+#[cfg(feature = "kvm")]
 pub(crate) use kvm_debug::KvmDebug;
 #[cfg(mshv)]
 pub(crate) use mshv_debug::MshvDebug;
