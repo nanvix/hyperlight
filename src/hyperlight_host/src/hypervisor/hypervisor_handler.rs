@@ -35,9 +35,9 @@ use vmm_sys_util::signal::SIGRTMIN;
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Hypervisor::{WHvCancelRunVirtualProcessor, WHV_PARTITION_HANDLE};
 
-#[cfg(gdb)]
+#[cfg(feature = "gdb")]
 use super::gdb::create_gdb_thread;
-#[cfg(gdb)]
+#[cfg(feature = "gdb")]
 use crate::hypervisor::handlers::DbgMemAccessHandlerWrapper;
 use crate::hypervisor::handlers::{MemAccessHandlerWrapper, OutBHandlerWrapper};
 #[cfg(target_os = "windows")]
@@ -50,7 +50,7 @@ use crate::mem::ptr_offset::Offset;
 #[cfg(feature = "init-paging")]
 use crate::mem::shared_mem::SharedMemory;
 use crate::mem::shared_mem::{GuestSharedMemory, HostSharedMemory};
-#[cfg(gdb)]
+#[cfg(feature = "gdb")]
 use crate::sandbox::config::DebugInfo;
 use crate::sandbox::hypervisor::{get_available_hypervisor, HypervisorType};
 #[cfg(target_os = "linux")]
@@ -190,7 +190,7 @@ pub(crate) struct HvHandlerConfig {
     pub(crate) mem_access_handler: MemAccessHandlerWrapper,
     pub(crate) max_wait_for_cancellation: Duration,
     pub(crate) max_guest_log_level: Option<LevelFilter>,
-    #[cfg(gdb)]
+    #[cfg(feature = "gdb")]
     pub(crate) dbg_mem_access_handler: DbgMemAccessHandlerWrapper,
 }
 
@@ -239,7 +239,7 @@ impl HypervisorHandler {
     pub(crate) fn start_hypervisor_handler(
         &mut self,
         sandbox_memory_manager: SandboxMemoryManager<GuestSharedMemory>,
-        #[cfg(gdb)] debug_info: Option<DebugInfo>,
+        #[cfg(feature = "gdb")] debug_info: Option<DebugInfo>,
     ) -> Result<()> {
         let configuration = self.configuration.clone();
 
@@ -302,7 +302,7 @@ impl HypervisorHandler {
                                     hv = Some(set_up_hypervisor_partition(
                                         execution_variables.shm.try_lock().map_err(|e| new_error!("Failed to lock shm: {}", e))?.deref_mut().as_mut().ok_or_else(|| new_error!("shm not set"))?,
                                         configuration.outb_handler.clone(),
-                                        #[cfg(gdb)]
+                                        #[cfg(feature = "gdb")]
                                         &debug_info,
                                     )?);
                                 }
@@ -354,7 +354,7 @@ impl HypervisorHandler {
                                     configuration.mem_access_handler.clone(),
                                     Some(hv_handler_clone.clone()),
                                     configuration.max_guest_log_level,
-                                    #[cfg(gdb)]
+                                    #[cfg(feature = "gdb")]
                                     configuration.dbg_mem_access_handler.clone(),
                                 );
                                 drop(mem_lock_guard);
@@ -437,7 +437,7 @@ impl HypervisorHandler {
                                             configuration.outb_handler.clone(),
                                             configuration.mem_access_handler.clone(),
                                             Some(hv_handler_clone.clone()),
-                                            #[cfg(gdb)]
+                                            #[cfg(feature = "gdb")]
                                             configuration.dbg_mem_access_handler.clone(),
                                         )
                                     },
@@ -597,7 +597,7 @@ impl HypervisorHandler {
         // from the handler thread, as the thread may be paused by gdb.
         // In this case, we will wait indefinitely for a message from the handler thread.
         // Note: This applies to all the running sandboxes, not just the one being debugged.
-        #[cfg(gdb)]
+        #[cfg(feature = "gdb")]
         let response = self.communication_channels.from_handler_rx.recv();
         #[cfg(not(gdb))]
         let response = self
@@ -830,7 +830,7 @@ fn set_up_hypervisor_partition(
     mgr: &mut SandboxMemoryManager<GuestSharedMemory>,
     #[allow(unused_variables)] // parameter only used for in-process mode
     outb_handler: OutBHandlerWrapper,
-    #[cfg(gdb)] debug_info: &Option<DebugInfo>,
+    #[cfg(feature = "gdb")] debug_info: &Option<DebugInfo>,
 ) -> Result<Box<dyn Hypervisor>> {
     #[cfg(feature = "init-paging")]
     let rsp_ptr = {
@@ -870,7 +870,7 @@ fn set_up_hypervisor_partition(
 
     // Create gdb thread if gdb is enabled and the configuration is provided
     // This is only done when the hypervisor is not in-process
-    #[cfg(gdb)]
+    #[cfg(feature = "gdb")]
     let gdb_conn = if let Some(DebugInfo { port }) = debug_info {
         let gdb_conn = create_gdb_thread(*port, unsafe { pthread_self() });
 
@@ -896,7 +896,7 @@ fn set_up_hypervisor_partition(
                 entrypoint_ptr,
                 rsp_ptr,
                 pml4_ptr,
-                #[cfg(gdb)]
+                #[cfg(feature = "gdb")]
                 gdb_conn,
             )?;
             Ok(Box::new(hv))
@@ -911,7 +911,7 @@ fn set_up_hypervisor_partition(
                 mgr.initrd_addr.clone().into(),
                 mgr.initrd_size,
                 rsp_ptr.absolute()?,
-                #[cfg(gdb)]
+                #[cfg(feature = "gdb")]
                 gdb_conn,
             )?;
             Ok(Box::new(hv))

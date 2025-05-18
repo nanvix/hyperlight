@@ -29,7 +29,7 @@ use windows::Win32::System::Hypervisor::{
 };
 
 use super::fpu::{FP_TAG_WORD_DEFAULT, MXCSR_DEFAULT};
-#[cfg(gdb)]
+#[cfg(feature = "gdb")]
 use super::handlers::DbgMemAccessHandlerWrapper;
 use super::handlers::{MemAccessHandlerWrapper, OutBHandlerWrapper};
 use super::surrogate_process::SurrogateProcess;
@@ -309,7 +309,7 @@ impl Hypervisor for HypervWindowsDriver {
         mem_access_hdl: MemAccessHandlerWrapper,
         hv_handler: Option<HypervisorHandler>,
         max_guest_log_level: Option<LevelFilter>,
-        #[cfg(gdb)] dbg_mem_access_hdl: DbgMemAccessHandlerWrapper,
+        #[cfg(feature = "gdb")] dbg_mem_access_hdl: DbgMemAccessHandlerWrapper,
     ) -> Result<()> {
         let max_guest_log_level: u64 = match max_guest_log_level {
             Some(level) => level as u64,
@@ -336,7 +336,7 @@ impl Hypervisor for HypervWindowsDriver {
             hv_handler,
             outb_hdl,
             mem_access_hdl,
-            #[cfg(gdb)]
+            #[cfg(feature = "gdb")]
             dbg_mem_access_hdl,
         )?;
 
@@ -350,7 +350,7 @@ impl Hypervisor for HypervWindowsDriver {
         outb_hdl: OutBHandlerWrapper,
         mem_access_hdl: MemAccessHandlerWrapper,
         hv_handler: Option<HypervisorHandler>,
-        #[cfg(gdb)] dbg_mem_access_hdl: DbgMemAccessHandlerWrapper,
+        #[cfg(feature = "gdb")] dbg_mem_access_hdl: DbgMemAccessHandlerWrapper,
     ) -> Result<()> {
         // Reset general purpose registers, then set RIP and RSP
         let regs = WHvGeneralRegisters {
@@ -374,7 +374,7 @@ impl Hypervisor for HypervWindowsDriver {
             hv_handler,
             outb_hdl,
             mem_access_hdl,
-            #[cfg(gdb)]
+            #[cfg(feature = "gdb")]
             dbg_mem_access_hdl,
         )?;
 

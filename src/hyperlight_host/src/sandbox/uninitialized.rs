@@ -23,7 +23,7 @@ use std::time::Duration;
 use log::LevelFilter;
 use tracing::{instrument, Span};
 
-#[cfg(gdb)]
+#[cfg(feature = "gdb")]
 use super::config::DebugInfo;
 use super::host_funcs::{default_writer_func, FunctionRegistry};
 use super::mem_mgr::MemMgrWrapper;
@@ -71,7 +71,7 @@ pub struct UninitializedSandbox {
     pub(crate) max_execution_time: Duration,
     pub(crate) max_wait_for_cancellation: Duration,
     pub(crate) max_guest_log_level: Option<LevelFilter>,
-    #[cfg(gdb)]
+    #[cfg(feature = "gdb")]
     pub(crate) debug_info: Option<DebugInfo>,
 }
 
@@ -178,7 +178,7 @@ impl UninitializedSandbox {
 
         let sandbox_cfg = cfg.unwrap_or_default();
 
-        #[cfg(gdb)]
+        #[cfg(feature = "gdb")]
         let debug_info = sandbox_cfg.get_guest_debug_info();
         let mut mem_mgr_wrapper = {
             let mut mgr = UninitializedSandbox::load_guest_binary(sandbox_cfg, &guest_binary)?;
@@ -218,7 +218,7 @@ impl UninitializedSandbox {
                 sandbox_cfg.get_max_wait_for_cancellation() as u64,
             ),
             max_guest_log_level: None,
-            #[cfg(gdb)]
+            #[cfg(feature = "gdb")]
             debug_info,
         };
 

@@ -29,7 +29,7 @@ use std::fmt::{Debug, Formatter};
 use log::{error, LevelFilter};
 #[cfg(mshv2)]
 use mshv_bindings::hv_message;
-#[cfg(gdb)]
+#[cfg(feature = "gdb")]
 use mshv_bindings::{
     hv_intercept_parameters, hv_intercept_type_HV_INTERCEPT_TYPE_EXCEPTION,
     hv_message_type_HVMSG_X64_EXCEPTION_INTERCEPT, mshv_install_intercept,
@@ -50,9 +50,9 @@ use mshv_ioctls::{Mshv, VcpuFd, VmFd};
 use tracing::{instrument, Span};
 
 use super::fpu::{FP_CONTROL_WORD_DEFAULT, FP_TAG_WORD_DEFAULT, MXCSR_DEFAULT};
-#[cfg(gdb)]
+#[cfg(feature = "gdb")]
 use super::gdb::{DebugCommChannel, DebugMsg, DebugResponse, GuestDebug, MshvDebug};
-#[cfg(gdb)]
+#[cfg(feature = "gdb")]
 use super::handlers::DbgMemAccessHandlerWrapper;
 use super::handlers::{MemAccessHandlerWrapper, OutBHandlerWrapper};
 use super::{
@@ -63,11 +63,11 @@ use crate::hypervisor::hypervisor_handler::HypervisorHandler;
 use crate::hypervisor::HyperlightExit;
 use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
 use crate::mem::ptr::{GuestPtr, RawPtr};
-#[cfg(gdb)]
+#[cfg(feature = "gdb")]
 use crate::HyperlightError;
 use crate::{log_then_return, new_error, Result};
 
-#[cfg(gdb)]
+#[cfg(feature = "gdb")]
 mod debug {
     use std::sync::{Arc, Mutex};
 
@@ -294,9 +294,9 @@ pub(super) struct HypervLinuxDriver {
     mem_regions: Vec<MemoryRegion>,
     orig_rsp: GuestPtr,
 
-    #[cfg(gdb)]
+    #[cfg(feature = "gdb")]
     debug: Option<MshvDebug>,
-    #[cfg(gdb)]
+    #[cfg(feature = "gdb")]
     gdb_conn: Option<DebugCommChannel<DebugResponse, DebugMsg>>,
 }
 
@@ -315,7 +315,7 @@ impl HypervLinuxDriver {
         entrypoint_ptr: GuestPtr,
         rsp_ptr: GuestPtr,
         pml4_ptr: GuestPtr,
-        #[cfg(gdb)] gdb_conn: Option<DebugCommChannel<DebugResponse, DebugMsg>>,
+        #[cfg(feature = "gdb")] gdb_conn: Option<DebugCommChannel<DebugResponse, DebugMsg>>,
     ) -> Result<Self> {
         let mshv = Mshv::new()?;
         let pr = Default::default();
@@ -339,7 +339,7 @@ impl HypervLinuxDriver {
 
         let mut vcpu_fd = vm_fd.create_vcpu(0)?;
 
-        #[cfg(gdb)]
+        #[cfg(feature = "gdb")]
         let (debug, gdb_conn) = if let Some(gdb_conn) = gdb_conn {
             let mut debug = MshvDebug::new();
             debug.add_hw_breakpoint(&vcpu_fd, entrypoint_ptr.absolute()?)?;
@@ -391,9 +391,9 @@ impl HypervLinuxDriver {
             entrypoint: entrypoint_ptr.absolute()?,
             orig_rsp: rsp_ptr,
 
-            #[cfg(gdb)]
+            #[cfg(feature = "gdb")]
             debug,
-            #[cfg(gdb)]
+            #[cfg(feature = "gdb")]
             gdb_conn,
         })
     }
@@ -463,7 +463,7 @@ impl Hypervisor for HypervLinuxDriver {
         mem_access_hdl: MemAccessHandlerWrapper,
         hv_handler: Option<HypervisorHandler>,
         max_guest_log_level: Option<LevelFilter>,
-        #[cfg(gdb)] dbg_mem_access_fn: DbgMemAccessHandlerWrapper,
+        #[cfg(feature = "gdb")] dbg_mem_access_fn: DbgMemAccessHandlerWrapper,
     ) -> Result<()> {
         let max_guest_log_level: u64 = match max_guest_log_level {
             Some(level) => level as u64,
@@ -490,7 +490,7 @@ impl Hypervisor for HypervLinuxDriver {
             hv_handler,
             outb_hdl,
             mem_access_hdl,
-            #[cfg(gdb)]
+            #[cfg(feature = "gdb")]
             dbg_mem_access_fn,
         )?;
 
@@ -504,7 +504,7 @@ impl Hypervisor for HypervLinuxDriver {
         outb_handle_fn: OutBHandlerWrapper,
         mem_access_fn: MemAccessHandlerWrapper,
         hv_handler: Option<HypervisorHandler>,
-        #[cfg(gdb)] dbg_mem_access_fn: DbgMemAccessHandlerWrapper,
+        #[cfg(feature = "gdb")] dbg_mem_access_fn: DbgMemAccessHandlerWrapper,
     ) -> Result<()> {
         // Reset general purpose registers, then set RIP and RSP
         let regs = StandardRegisters {
@@ -530,7 +530,7 @@ impl Hypervisor for HypervLinuxDriver {
             hv_handler,
             outb_handle_fn,
             mem_access_fn,
-            #[cfg(gdb)]
+            #[cfg(feature = "gdb")]
             dbg_mem_access_fn,
         )?;
 
@@ -574,7 +574,7 @@ impl Hypervisor for HypervLinuxDriver {
             hv_message_type_HVMSG_X64_IO_PORT_INTERCEPT;
         const UNMAPPED_GPA_MESSAGE: hv_message_type = hv_message_type_HVMSG_UNMAPPED_GPA;
         const INVALID_GPA_ACCESS_MESSAGE: hv_message_type = hv_message_type_HVMSG_GPA_INTERCEPT;
-        #[cfg(gdb)]
+        #[cfg(feature = "gdb")]
         const EXCEPTION_INTERCEPT: hv_message_type = hv_message_type_HVMSG_X64_EXCEPTION_INTERCEPT;
 
         #[cfg(mshv2)]
@@ -637,7 +637,7 @@ impl Hypervisor for HypervLinuxDriver {
                 // and the intercepts are installed.
                 // Provide the extra information about the exception to accurately determine
                 // the stop reason
-                #[cfg(gdb)]
+                #[cfg(feature = "gdb")]
                 EXCEPTION_INTERCEPT => {
                     // Extract exception info from the message so we can figure out
                     // more information about the vCPU state
@@ -683,7 +683,7 @@ impl Hypervisor for HypervLinuxDriver {
         &self.mem_regions
     }
 
-    #[cfg(gdb)]
+    #[cfg(feature = "gdb")]
     fn handle_debug(
         &mut self,
         dbg_mem_access_fn: std::sync::Arc<
@@ -798,7 +798,7 @@ mod tests {
             entrypoint_ptr,
             rsp_ptr,
             pml4_ptr,
-            #[cfg(gdb)]
+            #[cfg(feature = "gdb")]
             None,
         )
         .unwrap();

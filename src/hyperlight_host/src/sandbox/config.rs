@@ -22,7 +22,7 @@ use tracing::{instrument, Span};
 use crate::mem::exe::ExeInfo;
 
 /// Used for passing debug configuration to a sandbox
-#[cfg(gdb)]
+#[cfg(feature = "gdb")]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct DebugInfo {
     /// Guest debug port
@@ -34,7 +34,7 @@ pub struct DebugInfo {
 #[repr(C)]
 pub struct SandboxConfiguration {
     /// Guest gdb debug port
-    #[cfg(gdb)]
+    #[cfg(feature = "gdb")]
     guest_debug_info: Option<DebugInfo>,
     /// The size of the memory buffer that is made available for input to the
     /// Guest Binary
@@ -126,7 +126,7 @@ impl SandboxConfiguration {
         max_execution_time: Option<Duration>,
         max_initialization_time: Option<Duration>,
         max_wait_for_cancellation: Option<Duration>,
-        #[cfg(gdb)] guest_debug_info: Option<DebugInfo>,
+        #[cfg(feature = "gdb")] guest_debug_info: Option<DebugInfo>,
     ) -> Self {
         Self {
             input_data_size: max(input_data_size, Self::MIN_INPUT_SIZE),
@@ -180,7 +180,7 @@ impl SandboxConfiguration {
                     None => Self::DEFAULT_MAX_INITIALIZATION_TIME,
                 }
             },
-            #[cfg(gdb)]
+            #[cfg(feature = "gdb")]
             guest_debug_info,
             guest_memory_size: 0,
         }
@@ -269,7 +269,7 @@ impl SandboxConfiguration {
     }
 
     /// Sets the configuration for the guest debug
-    #[cfg(gdb)]
+    #[cfg(feature = "gdb")]
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub fn set_guest_debug_info(&mut self, debug_info: DebugInfo) {
         self.guest_debug_info = Some(debug_info);
@@ -299,7 +299,7 @@ impl SandboxConfiguration {
         self.max_initialization_time
     }
 
-    #[cfg(gdb)]
+    #[cfg(feature = "gdb")]
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub(crate) fn get_guest_debug_info(&self) -> Option<DebugInfo> {
         self.guest_debug_info
@@ -353,7 +353,7 @@ impl Default for SandboxConfiguration {
             None,
             None,
             None,
-            #[cfg(gdb)]
+            #[cfg(feature = "gdb")]
             None,
         )
     }
@@ -387,7 +387,7 @@ mod tests {
             Some(Duration::from_millis(
                 MAX_WAIT_FOR_CANCELLATION_OVERRIDE as u64,
             )),
-            #[cfg(gdb)]
+            #[cfg(feature = "gdb")]
             None,
         );
         let exe_info = simple_guest_exe_info().unwrap();
@@ -430,7 +430,7 @@ mod tests {
             Some(Duration::from_millis(
                 SandboxConfiguration::MIN_MAX_WAIT_FOR_CANCELLATION as u64 - 1,
             )),
-            #[cfg(gdb)]
+            #[cfg(feature = "gdb")]
             None,
         );
         assert_eq!(SandboxConfiguration::MIN_INPUT_SIZE, cfg.input_data_size);
@@ -478,7 +478,7 @@ mod tests {
         use proptest::prelude::*;
 
         use super::SandboxConfiguration;
-        #[cfg(gdb)]
+        #[cfg(feature = "gdb")]
         use crate::sandbox::config::DebugInfo;
 
         proptest! {
@@ -532,7 +532,7 @@ mod tests {
             }
 
             #[test]
-            #[cfg(gdb)]
+            #[cfg(feature = "gdb")]
             fn guest_debug_info(port in 9000..=u16::MAX) {
                 let mut cfg = SandboxConfiguration::default();
                 let debug_info = DebugInfo { port };

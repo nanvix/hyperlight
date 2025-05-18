@@ -20,7 +20,7 @@ use tracing::{instrument, Span};
 
 use super::mem_mgr::MemMgrWrapper;
 use crate::error::HyperlightError::StackOverflow;
-#[cfg(gdb)]
+#[cfg(feature = "gdb")]
 use crate::hypervisor::handlers::{DbgMemAccessHandlerCaller, DbgMemAccessHandlerWrapper};
 use crate::hypervisor::handlers::{
     MemAccessHandler, MemAccessHandlerFunction, MemAccessHandlerWrapper,
@@ -47,12 +47,12 @@ pub(crate) fn mem_access_handler_wrapper(
     Arc::new(Mutex::new(mem_access_hdl))
 }
 
-#[cfg(gdb)]
+#[cfg(feature = "gdb")]
 struct DbgMemAccessContainer {
     wrapper: MemMgrWrapper<HostSharedMemory>,
 }
 
-#[cfg(gdb)]
+#[cfg(feature = "gdb")]
 impl DbgMemAccessHandlerCaller for DbgMemAccessContainer {
     #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
     fn read(&mut self, addr: usize, data: &mut [u8]) -> Result<()> {
@@ -76,7 +76,7 @@ impl DbgMemAccessHandlerCaller for DbgMemAccessContainer {
     }
 }
 
-#[cfg(gdb)]
+#[cfg(feature = "gdb")]
 #[instrument(skip_all, parent = Span::current(), level= "Trace")]
 pub(crate) fn dbg_mem_access_handler_wrapper(
     wrapper: MemMgrWrapper<HostSharedMemory>,

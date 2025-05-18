@@ -16,7 +16,7 @@ limitations under the License.
 
 use std::convert::TryFrom;
 use std::fmt::Debug;
-#[cfg(gdb)]
+#[cfg(feature = "gdb")]
 use std::sync::{Arc, Mutex};
 
 use kvm_bindings::{kvm_fpu, kvm_regs, kvm_userspace_memory_region, KVM_MEM_READONLY};
@@ -26,9 +26,9 @@ use log::LevelFilter;
 use tracing::{instrument, Span};
 
 use super::fpu::{FP_CONTROL_WORD_DEFAULT, FP_TAG_WORD_DEFAULT, MXCSR_DEFAULT};
-#[cfg(gdb)]
+#[cfg(feature = "gdb")]
 use super::gdb::{DebugCommChannel, DebugMsg, DebugResponse, GuestDebug, KvmDebug, VcpuStopReason};
-#[cfg(gdb)]
+#[cfg(feature = "gdb")]
 use super::handlers::DbgMemAccessHandlerWrapper;
 use super::handlers::{MemAccessHandlerWrapper, OutBHandlerWrapper};
 use super::{HyperlightExit, Hypervisor, VirtualCPU};
@@ -40,7 +40,7 @@ use super::{
 use crate::hypervisor::hypervisor_handler::HypervisorHandler;
 use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
 use crate::mem::ptr::{GuestPtr, RawPtr};
-#[cfg(gdb)]
+#[cfg(feature = "gdb")]
 use crate::HyperlightError;
 use crate::{log_then_return, new_error, Result};
 
@@ -66,7 +66,7 @@ pub(crate) fn is_hypervisor_present() -> bool {
     }
 }
 
-#[cfg(gdb)]
+#[cfg(feature = "gdb")]
 mod debug {
     use std::sync::{Arc, Mutex};
 
@@ -286,9 +286,9 @@ pub(super) struct KVMDriver {
     orig_rsp: GuestPtr,
     mem_regions: Vec<MemoryRegion>,
 
-    #[cfg(gdb)]
+    #[cfg(feature = "gdb")]
     debug: Option<KvmDebug>,
-    #[cfg(gdb)]
+    #[cfg(feature = "gdb")]
     gdb_conn: Option<DebugCommChannel<DebugResponse, DebugMsg>>,
 }
 
@@ -304,7 +304,7 @@ impl KVMDriver {
         initrd_addr: u64,
         initrd_size: usize,
         rsp: u64,
-        #[cfg(gdb)] gdb_conn: Option<DebugCommChannel<DebugResponse, DebugMsg>>,
+        #[cfg(feature = "gdb")] gdb_conn: Option<DebugCommChannel<DebugResponse, DebugMsg>>,
     ) -> Result<Self> {
         let kvm = Kvm::new()?;
 
@@ -331,7 +331,7 @@ impl KVMDriver {
         let mut vcpu_fd = vm_fd.create_vcpu(0)?;
         Self::setup_initial_sregs(&mut vcpu_fd, pml4_addr)?;
 
-        #[cfg(gdb)]
+        #[cfg(feature = "gdb")]
         let (debug, gdb_conn) = if let Some(gdb_conn) = gdb_conn {
             let mut debug = KvmDebug::new();
             // Add breakpoint to the entry point address
@@ -354,9 +354,9 @@ impl KVMDriver {
             orig_rsp: rsp_gp,
             mem_regions,
 
-            #[cfg(gdb)]
+            #[cfg(feature = "gdb")]
             debug,
-            #[cfg(gdb)]
+            #[cfg(feature = "gdb")]
             gdb_conn,
         };
 
@@ -424,7 +424,7 @@ impl Hypervisor for KVMDriver {
         mem_access_hdl: MemAccessHandlerWrapper,
         hv_handler: Option<HypervisorHandler>,
         max_guest_log_level: Option<LevelFilter>,
-        #[cfg(gdb)] dbg_mem_access_fn: DbgMemAccessHandlerWrapper,
+        #[cfg(feature = "gdb")] dbg_mem_access_fn: DbgMemAccessHandlerWrapper,
     ) -> Result<()> {
         let max_guest_log_level: u64 = match max_guest_log_level {
             Some(level) => level as u64,
@@ -472,7 +472,7 @@ impl Hypervisor for KVMDriver {
             hv_handler,
             outb_hdl,
             mem_access_hdl,
-            #[cfg(gdb)]
+            #[cfg(feature = "gdb")]
             dbg_mem_access_fn,
         )?;
 
@@ -486,7 +486,7 @@ impl Hypervisor for KVMDriver {
         outb_handle_fn: OutBHandlerWrapper,
         mem_access_fn: MemAccessHandlerWrapper,
         hv_handler: Option<HypervisorHandler>,
-        #[cfg(gdb)] dbg_mem_access_fn: DbgMemAccessHandlerWrapper,
+        #[cfg(feature = "gdb")] dbg_mem_access_fn: DbgMemAccessHandlerWrapper,
     ) -> Result<()> {
         // Reset general purpose registers, then set RIP and RSP
         let regs = kvm_regs {
@@ -511,7 +511,7 @@ impl Hypervisor for KVMDriver {
             hv_handler,
             outb_handle_fn,
             mem_access_fn,
-            #[cfg(gdb)]
+            #[cfg(feature = "gdb")]
             dbg_mem_access_fn,
         )?;
 
@@ -587,7 +587,7 @@ impl Hypervisor for KVMDriver {
                     None => HyperlightExit::Mmio(addr),
                 }
             }
-            #[cfg(gdb)]
+            #[cfg(feature = "gdb")]
             // KVM provides architecture specific information about the vCPU state when exiting
             Ok(VcpuExit::Debug(debug_exit)) => match self.get_stop_reason(debug_exit) {
                 Ok(reason) => HyperlightExit::Debug(reason),
@@ -599,7 +599,7 @@ impl Hypervisor for KVMDriver {
                 // In case of the gdb feature, the timeout is not enabled, this
                 // exit is because of a signal sent from the gdb thread to the
                 // hypervisor thread to cancel execution
-                #[cfg(gdb)]
+                #[cfg(feature = "gdb")]
                 libc::EINTR => HyperlightExit::Debug(VcpuStopReason::Interrupt),
                 // we send a signal to the thread to cancel execution this results in EINTR being returned by KVM so we return Cancelled
                 #[cfg(not(gdb))]
@@ -629,7 +629,7 @@ impl Hypervisor for KVMDriver {
         &self.mem_regions
     }
 
-    #[cfg(gdb)]
+    #[cfg(feature = "gdb")]
     fn handle_debug(
         &mut self,
         dbg_mem_access_fn: Arc<Mutex<dyn super::handlers::DbgMemAccessHandlerCaller>>,
@@ -676,16 +676,16 @@ impl Hypervisor for KVMDriver {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    #[cfg(gdb)]
+    #[cfg(feature = "gdb")]
     use crate::hypervisor::handlers::DbgMemAccessHandlerCaller;
     use crate::hypervisor::handlers::{MemAccessHandler, OutBHandler};
     use crate::hypervisor::tests::test_initialise;
     use crate::Result;
 
-    #[cfg(gdb)]
+    #[cfg(feature = "gdb")]
     struct DbgMemAccessHandler {}
 
-    #[cfg(gdb)]
+    #[cfg(feature = "gdb")]
     impl DbgMemAccessHandlerCaller for DbgMemAccessHandler {
         fn read(&mut self, _offset: usize, _data: &mut [u8]) -> Result<()> {
             Ok(())
@@ -715,13 +715,13 @@ mod tests {
             let func: Box<dyn FnMut() -> Result<()> + Send> = Box::new(|| -> Result<()> { Ok(()) });
             Arc::new(Mutex::new(MemAccessHandler::from(func)))
         };
-        #[cfg(gdb)]
+        #[cfg(feature = "gdb")]
         let dbg_mem_access_handler = Arc::new(Mutex::new(DbgMemAccessHandler {}));
 
         test_initialise(
             outb_handler,
             mem_access_handler,
-            #[cfg(gdb)]
+            #[cfg(feature = "gdb")]
             dbg_mem_access_handler,
         )
         .unwrap();

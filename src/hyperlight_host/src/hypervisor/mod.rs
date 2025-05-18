@@ -36,7 +36,7 @@ pub(crate) mod hyperv_windows;
 pub(crate) mod hypervisor_handler;
 
 /// GDB debugging support
-#[cfg(gdb)]
+#[cfg(feature = "gdb")]
 mod gdb;
 
 #[cfg(kvm)]
@@ -62,10 +62,10 @@ use std::fmt::Debug;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
-#[cfg(gdb)]
+#[cfg(feature = "gdb")]
 use gdb::VcpuStopReason;
 
-#[cfg(gdb)]
+#[cfg(feature = "gdb")]
 use self::handlers::{DbgMemAccessHandlerCaller, DbgMemAccessHandlerWrapper};
 use self::handlers::{
     MemAccessHandlerCaller, MemAccessHandlerWrapper, OutBHandlerCaller, OutBHandlerWrapper,
@@ -95,7 +95,7 @@ cfg_if::cfg_if! {
 /// These are the generic exit reasons that we can handle from a Hypervisor the Hypervisors run method is responsible for mapping from
 /// the hypervisor specific exit reasons to these generic ones
 pub enum HyperlightExit {
-    #[cfg(gdb)]
+    #[cfg(feature = "gdb")]
     /// The vCPU has exited due to a debug event
     Debug(VcpuStopReason),
     /// The vCPU has halted
@@ -132,7 +132,7 @@ pub(crate) trait Hypervisor: Debug + Sync + Send {
         mem_access_fn: MemAccessHandlerWrapper,
         hv_handler: Option<HypervisorHandler>,
         guest_max_log_level: Option<LevelFilter>,
-        #[cfg(gdb)] dbg_mem_access_fn: DbgMemAccessHandlerWrapper,
+        #[cfg(feature = "gdb")] dbg_mem_access_fn: DbgMemAccessHandlerWrapper,
     ) -> Result<()>;
 
     /// Dispatch a call from the host to the guest using the given pointer
@@ -148,7 +148,7 @@ pub(crate) trait Hypervisor: Debug + Sync + Send {
         outb_handle_fn: OutBHandlerWrapper,
         mem_access_fn: MemAccessHandlerWrapper,
         hv_handler: Option<HypervisorHandler>,
-        #[cfg(gdb)] dbg_mem_access_fn: DbgMemAccessHandlerWrapper,
+        #[cfg(feature = "gdb")] dbg_mem_access_fn: DbgMemAccessHandlerWrapper,
     ) -> Result<()>;
 
     /// Handle an IO exit from the internally stored vCPU.
@@ -238,7 +238,7 @@ pub(crate) trait Hypervisor: Debug + Sync + Send {
     #[cfg(crashdump)]
     fn get_memory_regions(&self) -> &[MemoryRegion];
 
-    #[cfg(gdb)]
+    #[cfg(feature = "gdb")]
     /// handles the cases when the vCPU stops due to a Debug event
     fn handle_debug(
         &mut self,
@@ -260,11 +260,11 @@ impl VirtualCPU {
         hv_handler: Option<HypervisorHandler>,
         outb_handle_fn: Arc<Mutex<dyn OutBHandlerCaller>>,
         mem_access_fn: Arc<Mutex<dyn MemAccessHandlerCaller>>,
-        #[cfg(gdb)] dbg_mem_access_fn: Arc<Mutex<dyn DbgMemAccessHandlerCaller>>,
+        #[cfg(feature = "gdb")] dbg_mem_access_fn: Arc<Mutex<dyn DbgMemAccessHandlerCaller>>,
     ) -> Result<()> {
         loop {
             match hv.run() {
-                #[cfg(gdb)]
+                #[cfg(feature = "gdb")]
                 Ok(HyperlightExit::Debug(stop_reason)) => {
                     if let Err(e) = hv.handle_debug(dbg_mem_access_fn.clone(), stop_reason) {
                         log_then_return!(e);
@@ -343,7 +343,7 @@ pub(crate) mod tests {
 
     use hyperlight_testing::dummy_guest_as_string;
 
-    #[cfg(gdb)]
+    #[cfg(feature = "gdb")]
     use super::handlers::DbgMemAccessHandlerWrapper;
     use super::handlers::{MemAccessHandlerWrapper, OutBHandlerWrapper};
     use crate::hypervisor::hypervisor_handler::{
@@ -357,7 +357,7 @@ pub(crate) mod tests {
     pub(crate) fn test_initialise(
         outb_hdl: OutBHandlerWrapper,
         mem_access_hdl: MemAccessHandlerWrapper,
-        #[cfg(gdb)] dbg_mem_access_fn: DbgMemAccessHandlerWrapper,
+        #[cfg(feature = "gdb")] dbg_mem_access_fn: DbgMemAccessHandlerWrapper,
     ) -> Result<()> {
         let filename = dummy_guest_as_string().map_err(|e| new_error!("{}", e))?;
         if !Path::new(&filename).exists() {
@@ -375,7 +375,7 @@ pub(crate) mod tests {
         let hv_handler_config = HvHandlerConfig {
             outb_handler: outb_hdl,
             mem_access_handler: mem_access_hdl,
-            #[cfg(gdb)]
+            #[cfg(feature = "gdb")]
             dbg_mem_access_handler: dbg_mem_access_fn,
             seed: 1234567890,
             page_size: 4096,
@@ -410,7 +410,7 @@ pub(crate) mod tests {
 
         hv_handler.start_hypervisor_handler(
             gshm,
-            #[cfg(gdb)]
+            #[cfg(feature = "gdb")]
             None,
         )?;
 

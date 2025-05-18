@@ -244,7 +244,7 @@ pub enum HyperlightError {
 
     /// Error occurred when translating guest address
     #[error("An error occurred when translating guest address: {0:?}")]
-    #[cfg(gdb)]
+    #[cfg(feature = "gdb")]
     TranslateGuestAddress(u64),
 
     /// Error occurred converting a slice to an array

@@ -106,7 +106,7 @@ impl MemAccessHandlerCaller for MemAccessHandler {
 /// The trait representing custom logic to handle the case when
 /// a Hypervisor's virtual CPU (vCPU) informs Hyperlight a debug memory access
 /// has been requested.
-#[cfg(gdb)]
+#[cfg(feature = "gdb")]
 pub trait DbgMemAccessHandlerCaller: Send {
     /// Function that gets called when a read is requested.
     fn read(&mut self, addr: usize, data: &mut [u8]) -> Result<()>;
@@ -122,5 +122,5 @@ pub trait DbgMemAccessHandlerCaller: Send {
 ///
 /// Note: This needs to be wrapped in a Mutex to be able to grab a mutable
 /// reference to the underlying data
-#[cfg(gdb)]
+#[cfg(feature = "gdb")]
 pub type DbgMemAccessHandlerWrapper = Arc<Mutex<dyn DbgMemAccessHandlerCaller>>;

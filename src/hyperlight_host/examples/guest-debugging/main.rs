@@ -17,7 +17,7 @@ limitations under the License.
 use std::thread;
 
 use hyperlight_common::flatbuffer_wrappers::function_types::{ParameterValue, ReturnType};
-#[cfg(gdb)]
+#[cfg(feature = "gdb")]
 use hyperlight_host::sandbox::config::DebugInfo;
 use hyperlight_host::sandbox::SandboxConfiguration;
 use hyperlight_host::sandbox_state::sandbox::EvolvableSandbox;
@@ -26,7 +26,7 @@ use hyperlight_host::{MultiUseSandbox, UninitializedSandbox};
 
 /// Build a sandbox configuration that enables GDB debugging when the `gdb` feature is enabled.
 fn get_sandbox_cfg() -> Option<SandboxConfiguration> {
-    #[cfg(gdb)]
+    #[cfg(feature = "gdb")]
     {
         let mut cfg = SandboxConfiguration::default();
         let debug_info = DebugInfo { port: 8080 };
@@ -75,7 +75,7 @@ fn main() -> hyperlight_host::Result<()> {
     Ok(())
 }
 
-#[cfg(gdb)]
+#[cfg(feature = "gdb")]
 #[cfg(test)]
 mod tests {
     use std::fs::File;

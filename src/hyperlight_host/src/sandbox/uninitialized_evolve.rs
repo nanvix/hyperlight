@@ -21,7 +21,7 @@ use log::LevelFilter;
 use rand::Rng;
 use tracing::{instrument, Span};
 
-#[cfg(gdb)]
+#[cfg(feature = "gdb")]
 use super::mem_access::dbg_mem_access_handler_wrapper;
 use crate::hypervisor::hypervisor_handler::{
     HvHandlerConfig, HypervisorHandler, HypervisorHandlerAction,
@@ -29,7 +29,7 @@ use crate::hypervisor::hypervisor_handler::{
 use crate::mem::mgr::SandboxMemoryManager;
 use crate::mem::ptr::RawPtr;
 use crate::mem::shared_mem::GuestSharedMemory;
-#[cfg(gdb)]
+#[cfg(feature = "gdb")]
 use crate::sandbox::config::DebugInfo;
 use crate::sandbox::host_funcs::FunctionRegistry;
 use crate::sandbox::mem_access::mem_access_handler_wrapper;
@@ -72,7 +72,7 @@ where
             u_sbox.max_execution_time,
             u_sbox.max_wait_for_cancellation,
             u_sbox.max_guest_log_level,
-            #[cfg(gdb)]
+            #[cfg(feature = "gdb")]
             u_sbox.debug_info,
         )?;
 
@@ -110,11 +110,11 @@ fn hv_init(
     max_exec_time: Duration,
     max_wait_for_cancellation: Duration,
     max_guest_log_level: Option<LevelFilter>,
-    #[cfg(gdb)] debug_info: Option<DebugInfo>,
+    #[cfg(feature = "gdb")] debug_info: Option<DebugInfo>,
 ) -> Result<HypervisorHandler> {
     let outb_hdl = outb_handler_wrapper(hshm.clone(), host_funcs);
     let mem_access_hdl = mem_access_handler_wrapper(hshm.clone());
-    #[cfg(gdb)]
+    #[cfg(feature = "gdb")]
     let dbg_mem_access_hdl = dbg_mem_access_handler_wrapper(hshm.clone());
 
     let seed = {
@@ -129,7 +129,7 @@ fn hv_init(
     let hv_handler_config = HvHandlerConfig {
         outb_handler: outb_hdl,
         mem_access_handler: mem_access_hdl,
-        #[cfg(gdb)]
+        #[cfg(feature = "gdb")]
         dbg_mem_access_handler: dbg_mem_access_hdl,
         seed,
         page_size,
@@ -147,7 +147,7 @@ fn hv_init(
 
     hv_handler.start_hypervisor_handler(
         gshm,
-        #[cfg(gdb)]
+        #[cfg(feature = "gdb")]
         debug_info,
     )?;
 
