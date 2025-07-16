@@ -334,7 +334,35 @@ impl KVMDriver {
     ) -> Result<Self> {
         let kvm = Kvm::new()?;
 
-        let vm_fd = kvm.create_vm_with_type(0)?;
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "host-interrupts")] {
+                if !kvm.check_extension(kvm_ioctls::Cap::Irqchip) {
+                    log_then_return!("KVM does not support KVM_CAP_IRQCHIP");
+                }
+
+                if !kvm.check_extension(kvm_ioctls::Cap::Pit2) {
+                    log_then_return!("KVM does not support KVM_CAP_PIT2");
+                }
+            }
+        }
+
+        #[allow(unused_mut)]
+        let mut vm_fd = kvm.create_vm_with_type(0)?;
+
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "host-interrupts")] {
+                vm_fd.create_irq_chip()?;
+
+                // Enable the emulation of a dummy speaker port stub so that writing to port 0x61
+                // does not cause a KVM_EXIT event.
+                let pit_config = kvm_bindings::kvm_pit_config {
+                    flags: kvm_bindings::KVM_PIT_SPEAKER_DUMMY,
+                    ..Default::default()
+                };
+
+                vm_fd.create_pit2(pit_config)?;
+            }
+        }
 
         mem_regions.iter().enumerate().try_for_each(|(i, region)| {
             let mut kvm_region: kvm_userspace_memory_region = region.clone().into();
