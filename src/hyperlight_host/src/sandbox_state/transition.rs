@@ -21,6 +21,9 @@ use tracing::{Span, instrument};
 use super::sandbox::Sandbox;
 use crate::Result;
 use crate::func::call_ctx::MultiUseGuestCallContext;
+use crate::mem::mgr::SandboxMemoryManager;
+use crate::mem::shared_mem::{GuestSharedMemory, HostSharedMemory};
+use crate::sandbox::mem_mgr::{MemMgrWrapper};
 
 /// Metadata about an evolution or devolution. Any `Sandbox` implementation
 /// that also implements `EvolvableSandbox` or `DevolvableSandbox`
@@ -113,6 +116,36 @@ impl<Cur: Sandbox, Next: Sandbox, F> TransitionMetadata<Cur, Next>
     for MultiUseContextCallback<'_, Cur, F>
 where
     F: FnOnce(&mut MultiUseGuestCallContext) -> Result<()>,
+{
+}
+
+/// Transition metadata that contains pre-built memory managers
+pub struct PreBuiltMemoryManagers<Cur: Sandbox, Next: Sandbox> {
+    /// The host shared memory manager wrapper
+    pub hshm: MemMgrWrapper<HostSharedMemory>,
+    /// The guest shared memory manager
+    pub gshm: SandboxMemoryManager<GuestSharedMemory>,
+    cur_ph: PhantomData<Cur>,
+    next_ph: PhantomData<Next>,
+}
+
+impl<Cur: Sandbox, Next: Sandbox> PreBuiltMemoryManagers<Cur, Next> {
+    /// Constructs a new `PreBuiltMemoryManagers` instance
+    pub fn new(
+        hshm: MemMgrWrapper<HostSharedMemory>,
+        gshm: SandboxMemoryManager<GuestSharedMemory>,
+    ) -> Self {
+        Self {
+            hshm,
+            gshm,
+            cur_ph: PhantomData,
+            next_ph: PhantomData,
+        }
+    }
+}
+
+impl<Cur: Sandbox, Next: Sandbox> TransitionMetadata<Cur, Next>
+    for PreBuiltMemoryManagers<Cur, Next>
 {
 }
 

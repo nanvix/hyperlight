@@ -34,8 +34,9 @@ use crate::mem::memory_region::{DEFAULT_GUEST_BLOB_MEM_FLAGS, MemoryRegionFlags}
 use crate::mem::mgr::{STACK_COOKIE_LEN, SandboxMemoryManager};
 use crate::mem::shared_mem::ExclusiveSharedMemory;
 use crate::sandbox::SandboxConfiguration;
+use crate::sandbox::uninitialized_evolve::evolve_impl_with_prebuilt_mem;
 use crate::sandbox_state::sandbox::EvolvableSandbox;
-use crate::sandbox_state::transition::Noop;
+use crate::sandbox_state::transition::{Noop, PreBuiltMemoryManagers};
 use crate::{MultiUseSandbox, Result, log_then_return, new_error};
 
 #[cfg(all(target_os = "linux", feature = "seccomp"))]
@@ -75,7 +76,7 @@ pub struct UninitializedSandbox {
     /// Registered host functions
     pub(crate) host_funcs: Arc<Mutex<FunctionRegistry>>,
     /// The memory manager for the sandbox.
-    pub(crate) mgr: MemMgrWrapper<ExclusiveSharedMemory>,
+    pub mgr: MemMgrWrapper<ExclusiveSharedMemory>,
     pub(crate) max_guest_log_level: Option<LevelFilter>,
     pub(crate) config: SandboxConfiguration,
     #[cfg(any(crashdump, gdb))]
@@ -121,6 +122,42 @@ impl
     #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
     fn evolve(self, _: Noop<UninitializedSandbox, MultiUseSandbox>) -> Result<MultiUseSandbox> {
         evolve_impl_multi_use(self)
+    }
+}
+
+impl
+    EvolvableSandbox<
+        UninitializedSandbox,
+        MultiUseSandbox,
+        PreBuiltMemoryManagers<UninitializedSandbox, MultiUseSandbox>,
+    > for UninitializedSandbox
+{
+    /// Evolve `self` to a `MultiUseSandbox` using pre-built memory managers.
+    #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
+    fn evolve(
+        self,
+        metadata: PreBuiltMemoryManagers<UninitializedSandbox, MultiUseSandbox>,
+    ) -> Result<MultiUseSandbox> {
+        evolve_impl_with_prebuilt_mem(
+            self,
+            metadata.hshm,
+            metadata.gshm,
+            |hf, mut hshm, vm, out_hdl, mem_hdl, dispatch_ptr| {
+                {
+                    hshm.as_mut().push_state()?;
+                }
+                Ok(MultiUseSandbox::from_uninit(
+                    hf,
+                    hshm.clone(),
+                    vm,
+                    out_hdl,
+                    mem_hdl,
+                    dispatch_ptr,
+                    #[cfg(gdb)]
+                    dbg_mem_access_handler_wrapper(hshm),
+                ))
+            },
+        )
     }
 }
 

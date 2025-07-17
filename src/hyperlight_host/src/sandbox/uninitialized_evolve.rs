@@ -46,6 +46,75 @@ use crate::sandbox_state::sandbox::Sandbox;
 use crate::signal_handlers::setup_signal_handlers;
 use crate::{MultiUseSandbox, Result, UninitializedSandbox, log_then_return, new_error};
 
+#[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
+pub(super) fn evolve_impl_with_prebuilt_mem<TransformFunc, ResSandbox: Sandbox>(
+    u_sbox: UninitializedSandbox,
+    hshm: MemMgrWrapper<HostSharedMemory>,
+    mut gshm: SandboxMemoryManager<GuestSharedMemory>,
+    transform: TransformFunc,
+) -> Result<ResSandbox>
+where
+    TransformFunc: Fn(
+        Arc<Mutex<FunctionRegistry>>,
+        MemMgrWrapper<HostSharedMemory>,
+        Box<dyn Hypervisor>,
+        Arc<Mutex<dyn OutBHandlerCaller>>,
+        Arc<Mutex<dyn MemAccessHandlerCaller>>,
+        RawPtr,
+    ) -> Result<ResSandbox>,
+{
+    let mut vm = set_up_hypervisor_partition(
+        &mut gshm,
+        &u_sbox.config,
+        #[cfg(any(crashdump, gdb))]
+        &u_sbox.rt_cfg,
+    )?;
+    let outb_hdl = outb_handler_wrapper(hshm.clone(), u_sbox.host_funcs.clone());
+
+    let seed = {
+        let mut rng = rand::rng();
+        rng.random::<u64>()
+    };
+    let peb_addr = {
+        let peb_u64 = u64::try_from(gshm.layout.peb_address)?;
+        RawPtr::from(peb_u64)
+    };
+
+    let page_size = u32::try_from(page_size::get())?;
+    let mem_access_hdl = mem_access_handler_wrapper(hshm.clone());
+
+    #[cfg(gdb)]
+    let dbg_mem_access_hdl = dbg_mem_access_handler_wrapper(hshm.clone());
+
+    #[cfg(target_os = "linux")]
+    setup_signal_handlers(&u_sbox.config)?;
+
+    vm.initialise(
+        peb_addr,
+        seed,
+        page_size,
+        outb_hdl.clone(),
+        mem_access_hdl.clone(),
+        u_sbox.max_guest_log_level,
+        #[cfg(gdb)]
+        dbg_mem_access_hdl,
+    )?;
+
+    let dispatch_function_addr = hshm.as_ref().get_pointer_to_dispatch_function()?;
+    if dispatch_function_addr == 0 {
+        return Err(new_error!("Dispatch function address is null"));
+    }
+
+    transform(
+        u_sbox.host_funcs,
+        hshm,
+        vm,
+        outb_hdl,
+        mem_access_hdl,
+        RawPtr::from(dispatch_function_addr),
+    )
+}
+
 /// The implementation for evolving `UninitializedSandbox`es to
 /// `Sandbox`es.
 ///

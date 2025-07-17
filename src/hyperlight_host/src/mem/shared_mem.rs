@@ -649,7 +649,7 @@ impl ExclusiveSharedMemory {
     /// which may only make certain kinds of accesses that do not race
     /// in the presence of malicious code inside the guest mutating
     /// the GuestSharedMemory.
-    pub fn build(self) -> (HostSharedMemory, GuestSharedMemory) {
+    pub fn build(&self) -> (HostSharedMemory, GuestSharedMemory) {
         let lock = Arc::new(RwLock::new(()));
         (
             HostSharedMemory {
