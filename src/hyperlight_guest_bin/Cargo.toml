@@ -23,10 +23,12 @@ mem_profile = ["hyperlight-common/unwind_guest","hyperlight-common/mem_profile"]
 [dependencies]
 hyperlight-guest = { workspace = true, default-features = false }
 hyperlight-common = { workspace = true, default-features = false }
-hyperlight-guest-tracing = { workspace = true, default-features = false }
 buddy_system_allocator = "0.11.0"
 log = { version = "0.4", default-features = false }
 spin = "0.10.0"
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+hyperlight-guest-tracing = { workspace = true, default-features = false }
 
 [lints]
 workspace = true

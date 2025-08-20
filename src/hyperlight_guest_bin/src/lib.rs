@@ -32,6 +32,7 @@ use hyperlight_common::mem::HyperlightPEB;
 use hyperlight_common::outb::OutBAction;
 use hyperlight_guest::exit::{abort_with_code_and_message, halt};
 use hyperlight_guest::guest_handle::handle::GuestHandle;
+#[cfg(target_arch = "x86_64")]
 use hyperlight_guest_tracing::{trace, trace_function};
 use log::LevelFilter;
 use spin::Once;
@@ -156,7 +157,7 @@ unsafe extern "C" {
 static INIT: Once = Once::new();
 
 #[unsafe(no_mangle)]
-#[trace_function]
+#[cfg_attr(target_arch = "x86_64", trace_function)]
 pub extern "C" fn entrypoint(peb_address: u64, seed: u64, ops: u64, max_log_level: u64) {
     if peb_address == 0 {
         panic!("PEB address is null");
@@ -206,9 +207,17 @@ pub extern "C" fn entrypoint(peb_address: u64, seed: u64, ops: u64, max_log_leve
                 .expect("Invalid log level");
             init_logger(max_log_level);
 
-            trace!("hyperlight_main",
+            #[cfg(target_arch = "x86_64")]
+            {
+                trace!("hyperlight_main",
+                    hyperlight_main();
+                );
+            }
+
+            #[cfg(not(target_arch = "x86_64"))]
+            {
                 hyperlight_main();
-            );
+            }
         }
     });
 

@@ -40,7 +40,7 @@ impl Idtr {
     }
 }
 
-#[hyperlight_guest_tracing::trace_function]
+#[cfg_attr(target_arch = "x86_64", hyperlight_guest_tracing::trace_function)]
 pub(crate) unsafe fn load_idt() {
     unsafe {
         init_idt();

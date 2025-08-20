@@ -27,7 +27,7 @@ use crate::error::{HyperlightGuestError, Result};
 
 impl GuestHandle {
     /// Pops the top element from the shared input data buffer and returns it as a T
-    #[hyperlight_guest_tracing::trace_function]
+    #[cfg_attr(target_arch = "x86_64", hyperlight_guest_tracing::trace_function)]
     pub fn try_pop_shared_input_data_into<T>(&self) -> Result<T>
     where
         T: for<'a> TryFrom<&'a [u8]>,
@@ -68,6 +68,7 @@ impl GuestHandle {
 
         let buffer = &idb[last_element_offset_rel as usize..];
 
+        #[cfg(target_arch = "x86_64")]
         // convert the buffer to T
         let type_t = hyperlight_guest_tracing::trace!(
             "convert buffer",
@@ -81,6 +82,16 @@ impl GuestHandle {
                 }
             }
         );
+        #[cfg(not(target_arch = "x86_64"))]
+        let type_t = match T::try_from(buffer) {
+            Ok(t) => Ok(t),
+            Err(_e) => {
+                return Err(HyperlightGuestError::new(
+                    ErrorCode::GuestError,
+                    format!("Unable to convert buffer to {}", type_name::<T>()),
+                ));
+            }
+        };
 
         // update the stack pointer to point to the element we just popped of since that is now free
         idb[..8].copy_from_slice(&last_element_offset_rel.to_le_bytes());
@@ -92,7 +103,7 @@ impl GuestHandle {
     }
 
     /// Pushes the given data onto the shared output data buffer.
-    #[hyperlight_guest_tracing::trace_function]
+    #[cfg_attr(target_arch = "x86_64", hyperlight_guest_tracing::trace_function)]
     pub fn push_shared_output_data(&self, data: Vec<u8>) -> Result<()> {
         let peb_ptr = self.peb().unwrap();
         let output_stack_size = unsafe { (*peb_ptr).output_stack.size as usize };
@@ -138,9 +149,17 @@ impl GuestHandle {
         }
 
         // write the actual data
-        hyperlight_guest_tracing::trace!("copy data", {
+        #[cfg(target_arch = "x86_64")]
+        {
+            hyperlight_guest_tracing::trace!("copy data", {
+                odb[stack_ptr_rel as usize..stack_ptr_rel as usize + data.len()]
+                    .copy_from_slice(&data);
+            });
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
             odb[stack_ptr_rel as usize..stack_ptr_rel as usize + data.len()].copy_from_slice(&data);
-        });
+        }
 
         // write the offset to the newly written data, to the top of the stack
         let bytes: [u8; 8] = stack_ptr_rel.to_le_bytes();

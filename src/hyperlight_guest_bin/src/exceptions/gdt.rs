@@ -72,7 +72,7 @@ struct GdtPointer {
 }
 
 /// Load the GDT
-#[hyperlight_guest_tracing::trace_function]
+#[cfg_attr(target_arch = "x86_64", hyperlight_guest_tracing::trace_function)]
 pub unsafe fn load_gdt() {
     unsafe {
         let gdt_ptr = GdtPointer {
