@@ -323,7 +323,8 @@ impl SandboxMemoryLayout {
         // round up stack size to page size. This is needed for MemoryRegion
         let stack_size_rounded = round_up_to(stack_size, PAGE_SIZE_USIZE);
         let init_data_offset = guest_user_stack_buffer_offset + stack_size_rounded;
-        let extra_memory_offset = init_data_offset + init_data_size;
+        let init_data_rounded = round_up_to(init_data_size, PAGE_SIZE_USIZE);
+        let extra_memory_offset = init_data_offset + init_data_rounded;
 
         Ok(Self {
             peb_offset,
