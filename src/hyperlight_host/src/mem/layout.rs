@@ -25,7 +25,7 @@ use tracing::{instrument, Span};
 #[cfg(feature = "init-paging")]
 use super::memory_region::MemoryRegionType::PageTables;
 use super::memory_region::MemoryRegionType::{
-    Code, GuardPage, Heap, HostFunctionDefinitions, InitData, InputData, OutputData, Peb, Stack,
+    Code, ExtraMemory, GuardPage, Heap, HostFunctionDefinitions, InitData, InputData, OutputData, Peb, Stack,
 };
 use super::memory_region::{
     DEFAULT_GUEST_BLOB_MEM_FLAGS, MemoryRegion, MemoryRegionFlags, MemoryRegionVecBuilder,
@@ -34,6 +34,7 @@ use super::memory_region::{
 use super::mgr::AMOUNT_OF_MEMORY_PER_PT;
 use super::shared_mem::{ExclusiveSharedMemory, GuestSharedMemory, SharedMemory};
 use crate::error::HyperlightError::{GuestOffsetIsInvalid, MemoryRequestTooBig};
+use crate::mem::memory_region::DEFAULT_EXTRA_MEMORY_MEM_FLAGS;
 use crate::sandbox::SandboxConfiguration;
 use crate::{Result, new_error};
 
@@ -94,6 +95,7 @@ pub(crate) struct SandboxMemoryLayout {
     /// The heap size of this sandbox.
     pub(super) heap_size: usize,
     init_data_size: usize,
+    extra_memory_size: usize,
 
     /// The following fields are offsets to the actual PEB struct fields.
     /// They are used when writing the PEB struct itself
@@ -117,6 +119,7 @@ pub(crate) struct SandboxMemoryLayout {
     guard_page_offset: usize,
     guest_user_stack_buffer_offset: usize, // the lowest address of the user stack
     init_data_offset: usize,
+    extra_memory_offset: usize,
 
     // other
     pub(crate) peb_address: usize,
@@ -141,6 +144,7 @@ impl Debug for SandboxMemoryLayout {
                 "Init Data Size",
                 &format_args!("{:#x}", self.init_data_size),
             )
+            .field("Extra Memory Size", &format_args!("{:#x}", self.extra_memory_size))
             .field("PEB Address", &format_args!("{:#x}", self.peb_address))
             .field("PEB Offset", &format_args!("{:#x}", self.peb_offset))
             .field("Code Size", &format_args!("{:#x}", self.code_size))
@@ -171,6 +175,10 @@ impl Debug for SandboxMemoryLayout {
             .field(
                 "Init Data Offset",
                 &format_args!("{:#x}", self.peb_init_data_offset),
+            )
+            .field(
+                "Extra Memory Offset",
+                &format_args!("{:#x}", self.extra_memory_offset),
             )
             .field(
                 "Guest Heap Offset",
@@ -266,6 +274,7 @@ impl SandboxMemoryLayout {
         heap_size: usize,
         init_data_size: usize,
         init_data_permissions: Option<MemoryRegionFlags>,
+        extra_memory: u64,
     ) -> Result<Self> {
         #[cfg(feature = "init-paging")]
         let base = Self::get_total_page_table_size(cfg, code_size, stack_size, heap_size);
@@ -314,6 +323,7 @@ impl SandboxMemoryLayout {
         // round up stack size to page size. This is needed for MemoryRegion
         let stack_size_rounded = round_up_to(stack_size, PAGE_SIZE_USIZE);
         let init_data_offset = guest_user_stack_buffer_offset + stack_size_rounded;
+        let extra_memory_offset = init_data_offset + init_data_size;
 
         Ok(Self {
             peb_offset,
@@ -342,6 +352,8 @@ impl SandboxMemoryLayout {
             init_data_offset,
             init_data_size,
             init_data_permissions,
+            extra_memory_offset,
+            extra_memory_size: extra_memory as usize,
         })
     }
 
@@ -507,7 +519,7 @@ impl SandboxMemoryLayout {
     /// layout.
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     fn get_unaligned_memory_size(&self) -> usize {
-        self.init_data_offset + self.init_data_size
+        self.extra_memory_offset + self.extra_memory_size
     }
 
     /// get the code offset
@@ -775,13 +787,34 @@ impl SandboxMemoryLayout {
             ));
         }
 
-        let final_offset = if self.init_data_size > 0 {
+        let extra_memory_offset = if self.init_data_size > 0 {
             let mem_flags = self
                 .init_data_permissions
                 .unwrap_or(DEFAULT_GUEST_BLOB_MEM_FLAGS);
             builder.push_page_aligned(self.init_data_size, mem_flags, InitData)
         } else {
             init_data_offset
+        };
+
+        let expected_extra_memory_offset =
+            TryInto::<usize>::try_into(self.extra_memory_offset)?;
+
+        if extra_memory_offset != expected_extra_memory_offset {
+            return Err(new_error!(
+                "Extra Memory offset does not match expected Extra Memory offset expected:  {}, actual:  {}",
+                expected_extra_memory_offset,
+                extra_memory_offset
+            ));
+        }
+
+        let final_offset = if self.extra_memory_size > 0 {
+            builder.push_page_aligned(
+                self.extra_memory_size,
+                DEFAULT_EXTRA_MEMORY_MEM_FLAGS,
+                ExtraMemory,
+            )
+        } else {
+            extra_memory_offset
         };
 
         let expected_final_offset = TryInto::<usize>::try_into(self.get_memory_size()?)?;

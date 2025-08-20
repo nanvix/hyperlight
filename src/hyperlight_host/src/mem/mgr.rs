@@ -163,6 +163,8 @@ where
             for p in 0..num_pages {
                 for i in 0..512 {
                     // Each PTE maps a 4KB page
+
+                    use crate::mem::memory_region::DEFAULT_EXTRA_MEMORY_MEM_FLAGS;
                     let flags = match Self::get_page_flags(p, i, regions, &mut cached_region_idx) {
                         Ok(region_type) => match region_type {
                             // TODO: We parse and load the exe according to its sections and then
@@ -173,6 +175,7 @@ where
                                 .init_data_permissions
                                 .map(|perm| perm.translate_flags())
                                 .unwrap_or(DEFAULT_GUEST_BLOB_MEM_FLAGS.translate_flags()),
+                            MemoryRegionType::ExtraMemory => DEFAULT_EXTRA_MEMORY_MEM_FLAGS.translate_flags(),
                             MemoryRegionType::Stack => PAGE_PRESENT | PAGE_RW | PAGE_USER | PAGE_NX,
                             #[cfg(feature = "executable_heap")]
                             MemoryRegionType::Heap => PAGE_PRESENT | PAGE_RW | PAGE_USER,
@@ -315,6 +318,7 @@ impl SandboxMemoryManager<ExclusiveSharedMemory> {
         cfg: SandboxConfiguration,
         exe_info: ExeInfo,
         guest_blob: Option<&GuestBlob>,
+        extra_memory: Option<u64>,
     ) -> Result<(Self, super::exe::LoadInfo)> {
         let guest_blob_size = guest_blob.map(|b| b.data.len()).unwrap_or(0);
         let guest_blob_mem_flags = guest_blob.map(|b| b.permissions);
@@ -326,6 +330,7 @@ impl SandboxMemoryManager<ExclusiveSharedMemory> {
             usize::try_from(cfg.get_heap_size(&exe_info))?,
             guest_blob_size,
             guest_blob_mem_flags,
+            extra_memory.unwrap_or(0),
         )?;
         let mut shared_mem = ExclusiveSharedMemory::new(layout.get_memory_size()?)?;
 

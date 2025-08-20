@@ -143,6 +143,8 @@ pub struct GuestEnvironment<'a, 'b> {
     pub guest_binary: GuestBinary<'a>,
     /// An optional guest blob, which can be used to provide additional data to the guest.
     pub init_data: Option<GuestBlob<'b>>,
+    /// An extra optional u64 of data to allocate on the guest's memory.
+    pub extra_memory: Option<u64>,
 }
 
 impl<'a, 'b> GuestEnvironment<'a, 'b> {
@@ -151,6 +153,16 @@ impl<'a, 'b> GuestEnvironment<'a, 'b> {
         GuestEnvironment {
             guest_binary,
             init_data: init_data.map(GuestBlob::from),
+            extra_memory: None,
+        }
+    }
+
+    /// Creates a new `GuestEnvironment` with the given guest binary and an optional extra guest blob.
+    pub fn with_extra_memory(guest_binary: GuestBinary<'a>, init_data: Option<&'b [u8]>, extra_memory: u64) -> Self {
+        GuestEnvironment {
+            guest_binary,
+            init_data: init_data.map(GuestBlob::from),
+            extra_memory: Some(extra_memory),
         }
     }
 }
@@ -160,6 +172,7 @@ impl<'a> From<GuestBinary<'a>> for GuestEnvironment<'a, '_> {
         GuestEnvironment {
             guest_binary,
             init_data: None,
+            extra_memory: None,
         }
     }
 }
@@ -190,6 +203,7 @@ impl UninitializedSandbox {
         let env: GuestEnvironment<'_, '_> = env.into();
         let guest_binary = env.guest_binary;
         let guest_blob = env.init_data;
+        let extra_memory = env.extra_memory;
 
         // If the guest binary is a file make sure it exists
         let guest_binary = match guest_binary {
@@ -238,6 +252,7 @@ impl UninitializedSandbox {
                 sandbox_cfg,
                 &guest_binary,
                 guest_blob.as_ref(),
+                extra_memory,
             )?;
 
             let stack_guard = Self::create_stack_guard();
@@ -292,6 +307,7 @@ impl UninitializedSandbox {
         cfg: SandboxConfiguration,
         guest_binary: &GuestBinary,
         guest_blob: Option<&GuestBlob>,
+        extra_memory: Option<u64>,
     ) -> Result<(
         SandboxMemoryManager<ExclusiveSharedMemory>,
         crate::mem::exe::LoadInfo,
@@ -301,7 +317,7 @@ impl UninitializedSandbox {
             GuestBinary::Buffer(buffer) => ExeInfo::from_buf(buffer)?,
         };
 
-        SandboxMemoryManager::load_guest_binary_into_memory(cfg, exe_info, guest_blob)
+        SandboxMemoryManager::load_guest_binary_into_memory(cfg, exe_info, guest_blob, extra_memory)
     }
 
     /// Sets the maximum log level for guest code execution.
