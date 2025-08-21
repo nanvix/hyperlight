@@ -305,6 +305,53 @@ pub struct HostSharedMemory {
 unsafe impl Send for HostSharedMemory {}
 
 impl ExclusiveSharedMemory {
+    /// Read a value of type T, whose representation is the same
+    /// between the sandbox and the host, and which has no invalid bit
+    /// patterns
+    pub fn read<T: AllValid>(&self, offset: usize) -> Result<T> {
+        bounds_check!(offset, std::mem::size_of::<T>(), self.mem_size());
+        unsafe {
+            let mut ret: core::mem::MaybeUninit<T> = core::mem::MaybeUninit::uninit();
+            {
+                let slice: &mut [u8] = core::slice::from_raw_parts_mut(
+                    ret.as_mut_ptr() as *mut u8,
+                    std::mem::size_of::<T>(),
+                );
+                self.copy_to_slice(slice, offset)?;
+            }
+            Ok(ret.assume_init())
+        }
+    }
+
+    /// Write a value of type T, whose representation is the same
+    /// between the sandbox and the host, and which has no invalid bit
+    /// patterns
+    pub fn write<T: AllValid>(&self, offset: usize, data: T) -> Result<()> {
+        bounds_check!(offset, std::mem::size_of::<T>(), self.mem_size());
+        unsafe {
+            let slice: &[u8] = core::slice::from_raw_parts(
+                core::ptr::addr_of!(data) as *const u8,
+                std::mem::size_of::<T>(),
+            );
+            self.copy_from_slice2(slice, offset)?;
+        }
+        Ok(())
+    }
+
+    /// Copy the contents of the slice into the sandbox at the
+    /// specified offset
+    pub fn copy_to_slice(&self, slice: &mut [u8], offset: usize) -> Result<()> {
+        bounds_check!(offset, slice.len(), self.mem_size());
+        let base = self.base_ptr().wrapping_add(offset);
+        // todo: replace with something a bit more optimized + correct
+        for (i, b) in slice.iter_mut().enumerate() {
+            unsafe {
+                *b = base.wrapping_add(i).read_volatile();
+            }
+        }
+        Ok(())
+    }
+
     /// Create a new region of shared memory with the given minimum
     /// size in bytes. The region will be surrounded by guard pages.
     ///
@@ -605,6 +652,20 @@ impl ExclusiveSharedMemory {
     pub(crate) fn copy_all_to_vec(&self) -> Result<Vec<u8>> {
         let data = self.as_slice();
         Ok(data.to_vec())
+    }
+
+        /// Copy the contents of the sandbox at the specified offset into
+    /// the slice
+    pub fn copy_from_slice2(&self, slice: &[u8], offset: usize) -> Result<()> {
+        bounds_check!(offset, slice.len(), self.mem_size());
+        let base = self.base_ptr().wrapping_add(offset);
+        // todo: replace with something a bit more optimized + correct
+        for (i, b) in slice.iter().enumerate() {
+            unsafe {
+                base.wrapping_add(i).write_volatile(*b);
+            }
+        }
+        Ok(())
     }
 
     /// Copies all bytes from `src` to `self` starting at offset
