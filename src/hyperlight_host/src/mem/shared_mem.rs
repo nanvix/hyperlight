@@ -130,7 +130,9 @@ impl Drop for HostMapping {
 /// ExclusiveSharedMemory is used for certain operations that
 /// unrestrictedly write to the shared memory, including setting it up
 /// and taking snapshots.
-#[derive(Debug)]
+/// TODO(danbugs): There must be a better way to obtain a handle to memory than making
+/// this `Clone`.
+#[derive(Debug, Clone)]
 pub struct ExclusiveSharedMemory {
     region: Arc<HostMapping>,
 }

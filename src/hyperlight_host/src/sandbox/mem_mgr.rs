@@ -29,7 +29,7 @@ pub type StackCookie = [u8; STACK_COOKIE_LEN];
 /// A container with methods for accessing `SandboxMemoryManager` and other
 /// related objects
 #[derive(Clone)]
-pub(crate) struct MemMgrWrapper<S> {
+pub struct MemMgrWrapper<S> {
     mgr: SandboxMemoryManager<S>,
     stack_cookie: StackCookie,
     abort_buffer: Vec<u8>,
@@ -46,12 +46,12 @@ impl<S: SharedMemory> MemMgrWrapper<S> {
     }
 
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
-    pub(crate) fn unwrap_mgr(&self) -> &SandboxMemoryManager<S> {
+    pub fn unwrap_mgr(&self) -> &SandboxMemoryManager<S> {
         &self.mgr
     }
 
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
-    pub(crate) fn unwrap_mgr_mut(&mut self) -> &mut SandboxMemoryManager<S> {
+    pub fn unwrap_mgr_mut(&mut self) -> &mut SandboxMemoryManager<S> {
         &mut self.mgr
     }
 

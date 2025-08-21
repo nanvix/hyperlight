@@ -77,7 +77,7 @@ pub struct UninitializedSandbox {
     /// Registered host functions
     pub(crate) host_funcs: Arc<Mutex<FunctionRegistry>>,
     /// The memory manager for the sandbox.
-    pub(crate) mgr: MemMgrWrapper<ExclusiveSharedMemory>,
+    pub mgr: MemMgrWrapper<ExclusiveSharedMemory>,
     pub(crate) max_guest_log_level: Option<LevelFilter>,
     pub(crate) config: SandboxConfiguration,
     #[cfg(any(crashdump, gdb))]
