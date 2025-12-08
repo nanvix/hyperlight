@@ -73,7 +73,36 @@ impl KvmVm {
         let hv = KVM
             .as_ref()
             .map_err(|e| new_error!("Failed to create KVM instance: {}", e))?;
-        let vm_fd = hv.create_vm_with_type(0)?;
+
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "hw-interrupts")] {
+                if !hv.check_extension(kvm_ioctls::Cap::Irqchip) {
+                    crate::log_then_return!("KVM does not support KVM_CAP_IRQCHIP");
+                }
+
+                if !hv.check_extension(kvm_ioctls::Cap::Pit2) {
+                    crate::log_then_return!("KVM does not support KVM_CAP_PIT2");
+                }
+            }
+        }
+
+        #[allow(unused_mut)]
+        let mut vm_fd = hv.create_vm_with_type(0)?;
+
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "hw-interrupts")] {
+                vm_fd.create_irq_chip()?;
+
+                // Enable the emulation of a dummy speaker port stub so that writing to port 0x61
+                // does not cause a KVM_EXIT event.
+                let pit_config = kvm_bindings::kvm_pit_config {
+                    flags: kvm_bindings::KVM_PIT_SPEAKER_DUMMY,
+                    ..Default::default()
+                };
+
+                vm_fd.create_pit2(pit_config)?;
+            }
+        }
         let vcpu_fd = vm_fd.create_vcpu(0)?;
 
         Ok(Self {

@@ -145,6 +145,7 @@ gdb = ["dep:gdbstub", "dep:gdbstub_arch"]
 fuzzing = ["hyperlight-common/fuzzing"]
 build-metadata = ["dep:built"]
 init-paging = []
+hw-interrupts = []
 
 [[bench]]
 name = "benchmarks"
