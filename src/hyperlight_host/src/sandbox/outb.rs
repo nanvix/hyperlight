@@ -231,7 +231,7 @@ mod tests {
         let new_mgr = || {
             let exe_info = simple_guest_exe_info().unwrap();
             let (mut mgr, _) =
-                SandboxMemoryManager::load_guest_binary_into_memory(sandbox_cfg, exe_info, None)
+                SandboxMemoryManager::load_guest_binary_into_memory(sandbox_cfg, exe_info, None, None)
                     .unwrap();
             let mem_size = mgr.get_shared_mem_mut().mem_size();
             let layout = mgr.layout;
@@ -346,6 +346,7 @@ mod tests {
                     sandbox_cfg,
                     exe_info,
                     None,
+                    None
                 )
                 .unwrap();
                 let mem_size = mgr.get_shared_mem_mut().mem_size();
