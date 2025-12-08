@@ -102,6 +102,7 @@ pub(crate) struct SandboxMemoryLayout {
     peb_offset: usize,
     peb_security_cookie_seed_offset: usize,
     peb_guest_dispatch_function_ptr_offset: usize, // set by guest in guest entrypoint
+    peb_credits_value_offset: usize,
     peb_code_pointer_offset: usize,
     pub(super) peb_host_function_definitions_offset: usize,
     peb_input_data_offset: usize,
@@ -115,6 +116,7 @@ pub(crate) struct SandboxMemoryLayout {
     pub(crate) host_function_definitions_buffer_offset: usize,
     pub(super) input_data_buffer_offset: usize,
     pub(super) output_data_buffer_offset: usize,
+    guest_credits_value: u64,
     guest_heap_buffer_offset: usize,
     guard_page_offset: usize,
     guest_user_stack_buffer_offset: usize, // the lowest address of the user stack
@@ -163,6 +165,10 @@ impl Debug for SandboxMemoryLayout {
             .field(
                 "Code Pointer Offset",
                 &format_args!("{:#x}", self.peb_code_pointer_offset),
+            )
+            .field(
+                "Credits Value Offset",
+                &format_args!("{:#x}", self.peb_credits_value_offset),
             )
             .field(
                 "Input Data Offset",
@@ -215,6 +221,10 @@ impl Debug for SandboxMemoryLayout {
             .field(
                 "Init Data Offset",
                 &format_args!("{:#x}", self.init_data_offset),
+            )
+            .field(
+                "Guest Credits Value",
+                &format_args!("{:#x}", self.guest_credits_value),
             )
             .field(
                 "Page Table Size",
@@ -287,6 +297,8 @@ impl SandboxMemoryLayout {
             peb_offset + offset_of!(HyperlightPEB, security_cookie_seed);
         let peb_guest_dispatch_function_ptr_offset =
             peb_offset + offset_of!(HyperlightPEB, guest_function_dispatch_ptr);
+        let peb_credits_value_offset =
+            peb_offset + offset_of!(HyperlightPEB, credits_value);
         let peb_code_pointer_offset = peb_offset + offset_of!(HyperlightPEB, code_ptr);
         let peb_input_data_offset = peb_offset + offset_of!(HyperlightPEB, input_stack);
         let peb_output_data_offset = peb_offset + offset_of!(HyperlightPEB, output_stack);
@@ -332,6 +344,7 @@ impl SandboxMemoryLayout {
             heap_size,
             peb_security_cookie_seed_offset,
             peb_guest_dispatch_function_ptr_offset,
+            peb_credits_value_offset,
             peb_code_pointer_offset,
             peb_host_function_definitions_offset,
             peb_input_data_offset,
@@ -352,6 +365,7 @@ impl SandboxMemoryLayout {
             guest_code_offset,
             init_data_offset,
             init_data_size,
+            guest_credits_value: 0,
             init_data_permissions,
             extra_memory_offset,
             extra_memory_size: extra_memory as usize,
@@ -444,6 +458,18 @@ impl SandboxMemoryLayout {
         // The code pointer is the first field
         // in the `CodeAndOutBPointers` struct which is a u64
         self.peb_code_pointer_offset
+    }
+
+    /// Get the offset in guest memory to the credits value.
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
+    pub(super) fn get_credits_value_offset(&self) -> usize {
+        self.peb_credits_value_offset
+    }
+
+    /// Get the value of guest credits.
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
+    pub(super) fn get_credits_value(&self) -> u64 {
+        self.guest_credits_value
     }
 
     /// Get the offset in guest memory to where the guest dispatch function
@@ -851,6 +877,11 @@ impl SandboxMemoryLayout {
 
         // Skip code, is set when loading binary
         // skip outb and outb context, is set when running in_proc
+
+        shared_mem.write_u64(
+            self.get_credits_value_offset(),
+            self.get_credits_value(),
+        )?;
 
         // Set up input buffer pointer
         shared_mem.write_u64(

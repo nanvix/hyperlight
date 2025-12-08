@@ -63,7 +63,7 @@ pub(crate) const STACK_COOKIE_LEN: usize = 16;
 /// A struct that is responsible for laying out and managing the memory
 /// for a given `Sandbox`.
 #[derive(Clone)]
-pub(crate) struct SandboxMemoryManager<S> {
+pub struct SandboxMemoryManager<S> {
     /// Shared memory for the Sandbox
     pub(crate) shared_mem: S,
     /// The memory layout of the underlying shared memory
@@ -116,8 +116,7 @@ where
     }
 
     /// Get `SharedMemory` in `self` as a mutable reference
-    #[cfg(any(gdb, test))]
-    pub(crate) fn get_shared_mem_mut(&mut self) -> &mut S {
+    pub fn get_shared_mem_mut(&mut self) -> &mut S {
         &mut self.shared_mem
     }
 
@@ -428,6 +427,12 @@ impl SandboxMemoryManager<ExclusiveSharedMemory> {
         self.layout
             .write_init_data(&mut self.shared_mem, user_memory)?;
         Ok(())
+    }
+
+    /// Get the value of guest credits.
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
+    pub fn get_guest_credits_offset(&self) -> usize {
+        self.layout.get_credits_value_offset()
     }
 
     /// Wraps ExclusiveSharedMemory::build
