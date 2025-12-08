@@ -62,7 +62,7 @@ pub struct UninitializedSandbox {
     /// Registered host functions
     pub(crate) host_funcs: Arc<Mutex<FunctionRegistry>>,
     /// The memory manager for the sandbox.
-    pub(crate) mgr: SandboxMemoryManager<ExclusiveSharedMemory>,
+    pub mgr: SandboxMemoryManager<ExclusiveSharedMemory>,
     pub(crate) max_guest_log_level: Option<LevelFilter>,
     pub(crate) config: SandboxConfiguration,
     #[cfg(any(crashdump, gdb))]
@@ -140,6 +140,8 @@ pub struct GuestEnvironment<'a, 'b> {
     pub guest_binary: GuestBinary<'a>,
     /// An optional guest blob, which can be used to provide additional data to the guest.
     pub init_data: Option<GuestBlob<'b>>,
+    /// An extra optional u64 of data to allocate on the guest's memory.
+    pub extra_memory: Option<u64>,
 }
 
 impl<'a, 'b> GuestEnvironment<'a, 'b> {
@@ -148,6 +150,16 @@ impl<'a, 'b> GuestEnvironment<'a, 'b> {
         GuestEnvironment {
             guest_binary,
             init_data: init_data.map(GuestBlob::from),
+            extra_memory: None,
+        }
+    }
+
+    /// Creates a new `GuestEnvironment` with the given guest binary and an optional extra guest blob.
+    pub fn with_extra_memory(guest_binary: GuestBinary<'a>, init_data: Option<&'b [u8]>, extra_memory: u64) -> Self {
+        GuestEnvironment {
+            guest_binary,
+            init_data: init_data.map(GuestBlob::from),
+            extra_memory: Some(extra_memory),
         }
     }
 }
@@ -157,6 +169,7 @@ impl<'a> From<GuestBinary<'a>> for GuestEnvironment<'a, '_> {
         GuestEnvironment {
             guest_binary,
             init_data: None,
+            extra_memory: None,
         }
     }
 }
@@ -255,6 +268,32 @@ impl UninitializedSandbox {
             #[cfg(crashdump)]
             binary_path,
         )
+    }
+
+        // if env has a guest blob, load it into shared mem
+        if let Some(blob) = guest_blob {
+            mem_mgr_wrapper.write_init_data(blob.data)?;
+        }
+
+        let host_funcs = Arc::new(Mutex::new(FunctionRegistry::default()));
+
+        let mut sandbox = Self {
+            host_funcs,
+            mgr: mem_mgr_wrapper,
+            max_guest_log_level: None,
+            config: sandbox_cfg,
+            #[cfg(any(crashdump, gdb))]
+            rt_cfg,
+            load_info,
+        };
+
+        // If we were passed a writer for host print register it otherwise use the default.
+        sandbox.register_print(default_writer_func)?;
+
+        crate::debug!("Sandbox created:  {:#?}", sandbox);
+
+        Ok(sandbox)
+>>>>>>> cd6620a (Add extra memory region support)
     }
 
     /// Creates and initializes the virtual machine, transforming this into a ready-to-use sandbox.
