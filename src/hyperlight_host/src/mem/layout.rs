@@ -82,7 +82,7 @@ use tracing::{instrument, Span};
 #[cfg(feature = "init-paging")]
 use super::memory_region::MemoryRegionType::PageTables;
 use super::memory_region::MemoryRegionType::{
-    Code, GuardPage, Heap, HostFunctionDefinitions, InitData, InputData, OutputData, Peb, Stack,
+    Code, ExtraMemory, GuardPage, Heap, HostFunctionDefinitions, InitData, InputData, OutputData, Peb, Stack,
 };
 use super::memory_region::{
     DEFAULT_GUEST_BLOB_MEM_FLAGS, MemoryRegion, MemoryRegion_, MemoryRegionFlags, MemoryRegionKind,
@@ -90,6 +90,7 @@ use super::memory_region::{
 };
 use super::shared_mem::{ExclusiveSharedMemory, GuestSharedMemory, SharedMemory};
 use crate::error::HyperlightError::{GuestOffsetIsInvalid, MemoryRequestTooBig};
+use crate::mem::memory_region::DEFAULT_EXTRA_MEMORY_MEM_FLAGS;
 use crate::sandbox::SandboxConfiguration;
 use crate::{Result, new_error};
 
@@ -101,6 +102,7 @@ pub(crate) struct SandboxMemoryLayout {
     /// The heap size of this sandbox.
     pub(super) heap_size: usize,
     init_data_size: usize,
+    extra_memory_size: usize,
 
     /// The following fields are offsets to the actual PEB struct fields.
     /// They are used when writing the PEB struct itself
@@ -125,6 +127,8 @@ pub(crate) struct SandboxMemoryLayout {
     guard_page_offset: usize,
     guest_user_stack_buffer_offset: usize, // the lowest address of the user stack
     init_data_offset: usize,
+    extra_memory_offset: usize,
+    extra_memory_size: usize,
     pt_offset: usize,
     pt_size: Option<usize>,
 
@@ -149,6 +153,7 @@ impl Debug for SandboxMemoryLayout {
                 "Init Data Size",
                 &format_args!("{:#x}", self.init_data_size),
             )
+            .field("Extra Memory Size", &format_args!("{:#x}", self.extra_memory_size))
             .field("PEB Address", &format_args!("{:#x}", self.peb_address))
             .field("PEB Offset", &format_args!("{:#x}", self.peb_offset))
             .field("Code Size", &format_args!("{:#x}", self.code_size))
@@ -175,6 +180,10 @@ impl Debug for SandboxMemoryLayout {
             .field(
                 "Init Data Offset",
                 &format_args!("{:#x}", self.peb_init_data_offset),
+            )
+            .field(
+                "Extra Memory Offset",
+                &format_args!("{:#x}", self.extra_memory_offset),
             )
             .field(
                 "Guest Heap Offset",
@@ -255,6 +264,7 @@ impl SandboxMemoryLayout {
         heap_size: usize,
         init_data_size: usize,
         init_data_permissions: Option<MemoryRegionFlags>,
+        extra_memory: u64,
     ) -> Result<Self> {
         let guest_code_offset = 0;
         // The following offsets are to the fields of the PEB struct itself!
@@ -301,7 +311,9 @@ impl SandboxMemoryLayout {
         // round up stack size to page size. This is needed for MemoryRegion
         let stack_size_rounded = round_up_to(stack_size, PAGE_SIZE_USIZE);
         let init_data_offset = guest_user_stack_buffer_offset + stack_size_rounded;
-        let pt_offset = round_up_to(init_data_offset + init_data_size, PAGE_SIZE_USIZE);
+        let init_data_rounded = round_up_to(init_data_size, PAGE_SIZE_USIZE);
+        let extra_memory_offset = init_data_offset + init_data_rounded;
+        let pt_offset = round_up_to(extra_memory_offset + extra_memory as usize, PAGE_SIZE_USIZE);
 
         Ok(Self {
             peb_offset,
@@ -330,6 +342,8 @@ impl SandboxMemoryLayout {
             init_data_offset,
             init_data_size,
             init_data_permissions,
+            extra_memory_offset,
+            extra_memory_size: extra_memory as usize,
             pt_offset,
             pt_size: None,
         })
@@ -760,7 +774,7 @@ impl SandboxMemoryLayout {
             ));
         }
 
-        let after_init_offset = if self.init_data_size > 0 {
+        let extra_memory_offset = if self.init_data_size > 0 {
             let mem_flags = self
                 .init_data_permissions
                 .unwrap_or(DEFAULT_GUEST_BLOB_MEM_FLAGS);
@@ -769,15 +783,36 @@ impl SandboxMemoryLayout {
             init_data_offset
         };
 
+        let expected_extra_memory_offset =
+            TryInto::<usize>::try_into(self.extra_memory_offset)?;
+
+        if extra_memory_offset != expected_extra_memory_offset {
+            return Err(new_error!(
+                "Extra Memory offset does not match expected Extra Memory offset expected:  {}, actual:  {}",
+                expected_extra_memory_offset,
+                extra_memory_offset
+            ));
+        }
+
+        let after_extra_memory_offset = if self.extra_memory_size > 0 {
+            builder.push_page_aligned(
+                self.extra_memory_size,
+                DEFAULT_EXTRA_MEMORY_MEM_FLAGS,
+                ExtraMemory,
+            )
+        } else {
+            extra_memory_offset
+        };
+
         #[cfg(feature = "init-paging")]
         let final_offset = {
             let expected_pt_offset = TryInto::<usize>::try_into(self.pt_offset)?;
 
-            if after_init_offset != expected_pt_offset {
+            if after_extra_memory_offset != expected_pt_offset {
                 return Err(new_error!(
                     "Page table offset does not match expected:  {}, actual:  {}",
                     expected_pt_offset,
-                    after_init_offset
+                    after_extra_memory_offset
                 ));
             }
 
@@ -788,12 +823,12 @@ impl SandboxMemoryLayout {
                     PageTables,
                 )
             } else {
-                after_init_offset
+                after_extra_memory_offset
             }
         };
 
         #[cfg(not(feature = "init-paging"))]
-        let final_offset = after_init_offset;
+        let final_offset = after_extra_memory_offset;
 
         let expected_final_offset = TryInto::<usize>::try_into(self.get_memory_size()?)?;
 
@@ -1016,7 +1051,7 @@ mod tests {
     fn test_get_memory_size() {
         let sbox_cfg = SandboxConfiguration::default();
         let sbox_mem_layout =
-            SandboxMemoryLayout::new(sbox_cfg, 4096, 2048, 4096, 0, None).unwrap();
+            SandboxMemoryLayout::new(sbox_cfg, 4096, 2048, 4096, 0, None, 0).unwrap();
         assert_eq!(
             sbox_mem_layout.get_memory_size().unwrap(),
             get_expected_memory_size(&sbox_mem_layout)

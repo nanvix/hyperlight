@@ -32,6 +32,10 @@ use mshv_bindings::{hv_x64_memory_intercept_message, mshv_user_mem_region};
 use windows::Win32::System::Hypervisor::{self, WHV_MEMORY_ACCESS_TYPE};
 
 pub(crate) const DEFAULT_GUEST_BLOB_MEM_FLAGS: MemoryRegionFlags = MemoryRegionFlags::READ;
+// TODO(danbugs): this is the most permissable for now, should be configurable later.
+pub(crate) const DEFAULT_EXTRA_MEMORY_MEM_FLAGS: MemoryRegionFlags = MemoryRegionFlags::READ
+    .union(MemoryRegionFlags::WRITE)
+    .union(MemoryRegionFlags::EXECUTE);
 
 bitflags! {
     /// flags representing memory permission for a memory region
@@ -121,6 +125,8 @@ pub enum MemoryRegionType {
     Code,
     /// The region contains the guest's init data
     InitData,
+    /// Extra region set aside for future use
+    ExtraMemory,
     /// The region contains the PEB
     Peb,
     /// The region contains the Host Function Definitions
