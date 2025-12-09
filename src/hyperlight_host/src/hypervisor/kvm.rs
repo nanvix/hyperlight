@@ -18,7 +18,7 @@ use std::sync::LazyLock;
 
 #[cfg(gdb)]
 use kvm_bindings::kvm_guest_debug;
-use kvm_bindings::{kvm_fpu, kvm_regs, kvm_sregs, kvm_userspace_memory_region};
+use kvm_bindings::{KVM_MAX_CPUID_ENTRIES, kvm_fpu, kvm_regs, kvm_sregs, kvm_userspace_memory_region};
 use kvm_ioctls::Cap::UserMemory;
 use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
 use tracing::{Span, instrument};
@@ -103,6 +103,24 @@ impl KvmVm {
             }
         }
         let vcpu_fd = vm_fd.create_vcpu(0)?;
+
+        // set cpuid
+        let kvm = KVM
+            .as_ref()
+            .map_err(|e| new_error!("Failed to get KVM instance: {}", e))?;
+        let mut kvm_cpuid = kvm.get_supported_cpuid(KVM_MAX_CPUID_ENTRIES)?;
+        for entry in kvm_cpuid.as_mut_slice().iter_mut() {
+            match entry.function {
+                1 => {
+                    // Enable FXSR, SSE, and SSE2
+                    entry.edx |= 1 << 24; // FXSR
+                    entry.ecx |= 1 << 25; // SSE
+                    entry.ecx |= 1 << 26; // SSE2
+                }
+                _ => continue,
+            }
+        }
+        vcpu_fd.set_cpuid2(&kvm_cpuid)?;
 
         Ok(Self {
             vm_fd,
