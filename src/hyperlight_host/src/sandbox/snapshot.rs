@@ -120,6 +120,7 @@ impl Snapshot {
         let mut bin = env.guest_binary;
         bin.canonicalize()?;
         let blob = env.init_data;
+        let extra_memory = env.extra_memory.unwrap_or(0);
 
         use crate::mem::exe::ExeInfo;
         let exe_info = match bin {
@@ -138,6 +139,7 @@ impl Snapshot {
             usize::try_from(cfg.get_heap_size())?,
             guest_blob_size,
             guest_blob_mem_flags,
+            extra_memory,
         )?;
 
         let load_addr = layout.get_guest_code_address() as u64;
