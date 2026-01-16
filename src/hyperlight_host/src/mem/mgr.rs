@@ -268,7 +268,7 @@ impl SandboxMemoryManager<ExclusiveSharedMemory> {
     #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
     pub(crate) fn write_init_data(&mut self, user_memory: &[u8]) -> Result<()> {
         self.layout
-            .write_init_data(&mut self.shared_mem, user_memory)?;
+            .write_init_data(self.shared_mem.as_mut_slice(), user_memory)?;
         Ok(())
     }
 

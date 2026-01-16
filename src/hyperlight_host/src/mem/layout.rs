@@ -131,7 +131,6 @@ pub(crate) struct SandboxMemoryLayout {
     guest_user_stack_buffer_offset: usize, // the lowest address of the user stack
     init_data_offset: usize,
     extra_memory_offset: usize,
-    extra_memory_size: usize,
     pt_offset: usize,
     pt_size: Option<usize>,
 
@@ -458,6 +457,12 @@ impl SandboxMemoryLayout {
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub(super) fn get_credits_value_offset(&self) -> usize {
         self.peb_credits_value_offset
+    }
+
+    /// Get the credits value.
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
+    pub(super) fn get_credits_value(&self) -> u64 {
+        self.guest_credits_value
     }
 
     /// Get the offset in guest memory to where the guest dispatch function
