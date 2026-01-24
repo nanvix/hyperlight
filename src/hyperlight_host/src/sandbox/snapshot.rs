@@ -304,7 +304,7 @@ mod tests {
 
         let cfg = crate::sandbox::SandboxConfiguration::default();
         let layout =
-            crate::mem::layout::SandboxMemoryLayout::new(cfg, 4096, 2048, 4096, 0, None).unwrap();
+            crate::mem::layout::SandboxMemoryLayout::new(cfg, 4096, 2048, 4096, 0, None, 0).unwrap();
 
         // Take snapshot of data1
         let snapshot = super::Snapshot::new(
@@ -332,7 +332,7 @@ mod tests {
 
         let cfg = crate::sandbox::SandboxConfiguration::default();
         let layout =
-            crate::mem::layout::SandboxMemoryLayout::new(cfg, 4096, 2048, 4096, 0, None).unwrap();
+            crate::mem::layout::SandboxMemoryLayout::new(cfg, 4096, 2048, 4096, 0, None, 0).unwrap();
 
         let snapshot = super::Snapshot::new(
             &mut gm,
@@ -351,7 +351,7 @@ mod tests {
 
         let cfg = crate::sandbox::SandboxConfiguration::default();
         let layout =
-            crate::mem::layout::SandboxMemoryLayout::new(cfg, 4096, 2048, 4096, 0, None).unwrap();
+            crate::mem::layout::SandboxMemoryLayout::new(cfg, 4096, 2048, 4096, 0, None, 0).unwrap();
 
         // Create first snapshot with pattern A
         let pattern_a = vec![0xAA; PAGE_SIZE_USIZE];
