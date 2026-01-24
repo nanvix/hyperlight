@@ -156,25 +156,35 @@ pub(crate) fn handle_outb(
     #[cfg(feature = "mem_profile")] trace_info: &mut MemTraceInfo,
 ) -> Result<()> {
     match port.try_into()? {
-        OutBAction::Log => outb_log(mem_mgr),
+        OutBAction::Log => {
+            log::info!("OutBAction::Log - port: {}, data: {}", port, data);
+            outb_log(mem_mgr)
+        }
         OutBAction::CallFunction => {
+            log::info!("OutBAction::CallFunction - port: {}, data: {}", port, data);
             let call = mem_mgr.get_host_function_call()?; // pop output buffer
             let name = call.function_name.clone();
             let args: Vec<ParameterValue> = call.parameters.unwrap_or(vec![]);
+            log::info!("CallFunction - name: {}, args: {:?}", name, args);
             let res = host_funcs
                 .try_lock()
                 .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?
                 .call_host_function(&name, args)
                 .map_err(|e| GuestError::new(ErrorCode::HostFunctionError, e.to_string()));
 
+            log::info!("CallFunction - result: {:?}", res);
             let func_result = FunctionCallResult::new(res);
 
             mem_mgr.write_response_from_host_function_call(&func_result)?;
 
             Ok(())
         }
-        OutBAction::Abort => outb_abort(mem_mgr, data),
+        OutBAction::Abort => {
+            log::info!("OutBAction::Abort - port: {}, data: {}", port, data);
+            outb_abort(mem_mgr, data)
+        }
         OutBAction::DebugPrint => {
+            log::info!("OutBAction::DebugPrint - port: {}, data: {}", port, data);
             let ch: char = match char::from_u32(data) {
                 Some(c) => c,
                 None => {
