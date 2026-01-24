@@ -1079,11 +1079,22 @@ mod tests {
 
         expected_size += round_up_to(cfg.get_output_data_size(), PAGE_SIZE_USIZE);
 
+        // heap guard: gap from 4MB alignment of heap
+        let heap_guard_size = layout.guest_heap_buffer_offset - layout.output_data_buffer_offset
+            - round_up_to(cfg.get_output_data_size(), PAGE_SIZE_USIZE);
+        expected_size += round_up_to(heap_guard_size, PAGE_SIZE_USIZE);
+
         expected_size += round_up_to(layout.heap_size, PAGE_SIZE_USIZE);
 
         expected_size += PAGE_SIZE_USIZE; // guard page
 
         expected_size += round_up_to(layout.stack_size, PAGE_SIZE_USIZE);
+
+        // init data
+        expected_size += round_up_to(layout.init_data_size, PAGE_SIZE_USIZE);
+
+        // extra memory
+        expected_size += round_up_to(layout.extra_memory_size, PAGE_SIZE_USIZE);
 
         expected_size
     }
