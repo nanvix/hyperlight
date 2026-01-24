@@ -128,6 +128,16 @@ impl OpenFile {
     }
 }
 
+impl core::fmt::Debug for OpenFile {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("OpenFile")
+            .field("position", &self.position())
+            .field("size", &self.size())
+            .field("guest_address", &self.guest_address())
+            .finish()
+    }
+}
+
 /// A FAT file entry with its open flags.
 ///
 /// Uses `Rc<RefCell<>>` for shared ownership to support `dup()`/`dup2()`.
@@ -217,6 +227,15 @@ impl FatFdEntry {
     #[inline]
     pub fn flags(&self) -> i32 {
         self.inner.borrow().flags
+    }
+}
+
+impl core::fmt::Debug for FatFdEntry {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("FatFdEntry")
+            .field("mount_path", &self.mount_path())
+            .field("flags", &self.flags())
+            .finish_non_exhaustive()
     }
 }
 
@@ -532,7 +551,7 @@ pub fn open_count() -> usize {
 pub fn reset() {
     let table = FD_TABLE.get();
     table.slots.clear();
-    table.slots.resize(FIRST_AVAILABLE_FD, None);
+    table.slots.resize_with(FIRST_AVAILABLE_FD, || None);
 }
 
 #[cfg(test)]
@@ -570,12 +589,12 @@ mod tests {
     fn test_invalid_fd() {
         reset();
 
-        assert_eq!(get_ro_fd(-1), Err(FsError::InvalidFd));
-        assert_eq!(get_ro_fd(1000), Err(FsError::InvalidFd)); // Out of bounds
-        assert_eq!(get_ro_fd(0), Err(FsError::InvalidFd)); // Reserved (stdin)
-        assert_eq!(get_ro_fd(1), Err(FsError::InvalidFd)); // Reserved (stdout)
-        assert_eq!(get_ro_fd(2), Err(FsError::InvalidFd)); // Reserved (stderr)
-        assert_eq!(get_ro_fd(3), Err(FsError::InvalidFd)); // Not open yet
+        assert!(matches!(get_ro_fd(-1), Err(FsError::InvalidFd)));
+        assert!(matches!(get_ro_fd(1000), Err(FsError::InvalidFd))); // Out of bounds
+        assert!(matches!(get_ro_fd(0), Err(FsError::InvalidFd))); // Reserved (stdin)
+        assert!(matches!(get_ro_fd(1), Err(FsError::InvalidFd))); // Reserved (stdout)
+        assert!(matches!(get_ro_fd(2), Err(FsError::InvalidFd))); // Reserved (stderr)
+        assert!(matches!(get_ro_fd(3), Err(FsError::InvalidFd))); // Not open yet
     }
 
     #[test]
@@ -587,7 +606,7 @@ mod tests {
         // Allocate three fds (starting from 3 since 0-2 are reserved)
         let fd0 = alloc_ro_fd(file.dup());
         let fd1 = alloc_ro_fd(file.dup());
-        let fd2 = alloc_ro_fd(file);
+        let fd2 = alloc_ro_fd(file.dup());
         assert_eq!(fd0, 3);
         assert_eq!(fd1, 4);
         assert_eq!(fd2, 5);
@@ -598,7 +617,7 @@ mod tests {
         assert_eq!(open_count(), 2);
 
         // Next alloc should reuse slot 4
-        let fd3 = alloc_ro_fd(file);
+        let fd3 = alloc_ro_fd(file.dup());
         assert_eq!(fd3, 4);
         assert_eq!(open_count(), 3);
 
@@ -643,8 +662,8 @@ mod tests {
 
         // get_ro_fd works for RO
         assert!(get_ro_fd(ro_fd).is_ok());
-        // get_fat_fd fails for RO
-        assert_eq!(get_fat_fd(ro_fd), Err(FsError::InvalidFd));
+        // get_fat_fd fails for RO with InvalidFd
+        assert!(matches!(get_fat_fd(ro_fd), Err(FsError::InvalidFd)));
 
         // Note: We can't test alloc_fat_fd without a real GuestFatFile,
         // which requires an initialized FAT filesystem. That's tested
