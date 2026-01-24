@@ -128,6 +128,16 @@ impl OpenFile {
     }
 }
 
+impl core::fmt::Debug for OpenFile {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("OpenFile")
+            .field("position", &self.position())
+            .field("size", &self.size())
+            .field("guest_address", &self.guest_address())
+            .finish()
+    }
+}
+
 /// A FAT file entry with its open flags.
 ///
 /// Uses `Rc<RefCell<>>` for shared ownership to support `dup()`/`dup2()`.
@@ -217,6 +227,15 @@ impl FatFdEntry {
     #[inline]
     pub fn flags(&self) -> i32 {
         self.inner.borrow().flags
+    }
+}
+
+impl core::fmt::Debug for FatFdEntry {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("FatFdEntry")
+            .field("mount_path", &self.mount_path())
+            .field("flags", &self.flags())
+            .finish_non_exhaustive()
     }
 }
 
@@ -601,7 +620,7 @@ mod tests {
         assert_eq!(open_count(), 2);
 
         // Next alloc should reuse slot 4
-        let fd3 = alloc_ro_fd(file);
+        let fd3 = alloc_ro_fd(file.dup());
         assert_eq!(fd3, 4);
         assert_eq!(open_count(), 3);
 
