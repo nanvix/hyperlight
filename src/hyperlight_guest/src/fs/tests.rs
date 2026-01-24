@@ -484,3 +484,135 @@ fn test_read_to_vec() {
     let contents = file.read_to_vec().expect("read_to_vec failed");
     assert_eq!(contents.as_slice(), file_content);
 }
+
+#[test]
+fn test_into_raw_fd_transfers_ownership() {
+    reset_fs();
+
+    let file_content = b"test content";
+    TEST_FILE_DATA.write(file_content);
+
+    let guest_address = TEST_FILE_DATA.as_ptr();
+
+    let manifest = create_manifest(vec![
+        InodeData::directory("/".to_string(), 0),
+        InodeData::file(
+            "/test.txt".to_string(),
+            0,
+            guest_address,
+            file_content.len() as u64,
+        ),
+    ]);
+
+    unsafe {
+        init_test_fs(&manifest);
+    }
+
+    // Open file and extract the raw fd
+    let file = open("/test.txt").expect("open failed");
+    assert_eq!(fd::open_count(), 1);
+
+    let raw_fd = file.into_raw_fd();
+
+    // The fd should still be valid (not closed) because into_raw_fd transfers ownership
+    assert_eq!(fd::open_count(), 1);
+
+    // We can reconstruct a File from the fd and use it
+    // SAFETY: raw_fd is valid, we just got it from into_raw_fd()
+    let mut file2 = unsafe { file::File::from_raw_fd(raw_fd) };
+    let mut buf = [0u8; 64];
+    let n = file2.read(&mut buf).expect("read after into_raw_fd failed");
+    assert_eq!(n, file_content.len());
+    assert_eq!(&buf[..n], file_content);
+
+    // Now when file2 is dropped, the fd should be closed
+    drop(file2);
+    assert_eq!(fd::open_count(), 0);
+}
+
+#[test]
+fn test_into_raw_fd_does_not_close_on_original_drop() {
+    reset_fs();
+
+    let file_content = b"abc";
+    TEST_FILE_DATA.write(file_content);
+
+    let guest_address = TEST_FILE_DATA.as_ptr();
+
+    let manifest = create_manifest(vec![
+        InodeData::directory("/".to_string(), 0),
+        InodeData::file(
+            "/abc.txt".to_string(),
+            0,
+            guest_address,
+            file_content.len() as u64,
+        ),
+    ]);
+
+    unsafe {
+        init_test_fs(&manifest);
+    }
+
+    let raw_fd: file::RawFd;
+    {
+        let file = open("/abc.txt").expect("open failed");
+        assert_eq!(fd::open_count(), 1);
+        raw_fd = file.into_raw_fd();
+        // `file` is consumed by into_raw_fd, so there's no drop here
+    }
+
+    // The fd should still be valid because into_raw_fd prevents Drop
+    assert_eq!(fd::open_count(), 1);
+
+    // Clean up: manually close by creating a File wrapper and letting it drop
+    // SAFETY: raw_fd is valid, we just got it from into_raw_fd()
+    let _file = unsafe { file::File::from_raw_fd(raw_fd) };
+    drop(_file);
+    assert_eq!(fd::open_count(), 0);
+}
+
+#[test]
+fn test_rofile_into_raw_fd() {
+    reset_fs();
+
+    let file_content = b"rofile test";
+    TEST_FILE_DATA.write(file_content);
+
+    let guest_address = TEST_FILE_DATA.as_ptr();
+
+    let manifest = create_manifest(vec![
+        InodeData::directory("/".to_string(), 0),
+        InodeData::file(
+            "/ro.txt".to_string(),
+            0,
+            guest_address,
+            file_content.len() as u64,
+        ),
+    ]);
+
+    unsafe {
+        init_test_fs(&manifest);
+    }
+
+    // Open and extract RoFile via pattern matching
+    let file = open("/ro.txt").expect("open failed");
+    assert_eq!(fd::open_count(), 1);
+
+    // Extract the RoFile from the File enum
+    let ro_file = match file {
+        file::File::ReadOnly(ro) => ro,
+        file::File::Fat(_) => panic!("Expected ReadOnly file"),
+    };
+
+    let raw_fd = ro_file.into_raw_fd();
+
+    // fd should still be open
+    assert_eq!(fd::open_count(), 1);
+
+    // Clean up
+    // SAFETY: raw_fd is valid, we just got it from into_raw_fd()
+    let _file = unsafe { file::File::from_raw_fd(raw_fd) };
+    drop(_file);
+    assert_eq!(fd::open_count(), 0);
+}
+

@@ -120,8 +120,8 @@ pub use fd::{
     free_fd, get_fat_fd, get_fd_entry, get_ro_fd, has_open_files_on_mount,
 };
 pub use file::{
-    DirEntry, File, OpenOptions, Stat, chdir, cwd, mkdir, open, read_dir, rename, rmdir, stat,
-    unlink,
+    DirEntry, File, OpenOptions, RawFd, RoFile, Stat, chdir, cwd, mkdir, open, read_dir, rename,
+    rmdir, stat, unlink,
 };
 pub use manifest::{init, is_fat_region, is_initialized, vfs, vfs_mut};
 

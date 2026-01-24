@@ -57,6 +57,11 @@ use super::fat::GuestFatFile;
 use super::fd::{self, OpenFile};
 use super::manifest;
 
+/// Raw file descriptor type, matching [`std::os::fd::RawFd`].
+///
+/// This is an alias for `i32` to match POSIX conventions.
+pub type RawFd = i32;
+
 /// Builder for opening files with specific access options.
 ///
 /// This provides a readable, builder-pattern API for specifying file open modes
@@ -316,6 +321,27 @@ impl File {
         }
     }
 
+    /// Consume the File and return the raw file descriptor.
+    ///
+    /// This transfers ownership of the file descriptor to the caller.
+    /// The caller becomes responsible for closing it via `close()`.
+    /// The `Drop` implementation will NOT be called.
+    ///
+    /// # Returns
+    ///
+    /// The raw fd for read-only files.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called on a FAT file variant, since FAT files do not have
+    /// simple integer file descriptors.
+    pub fn into_raw_fd(self) -> RawFd {
+        match self {
+            File::ReadOnly(ro) => ro.into_raw_fd(),
+            File::Fat(_) => panic!("FAT files do not have raw file descriptors"),
+        }
+    }
+
     /// Create a read-only File from a file descriptor.
     ///
     /// This is only valid for read-only memory-mapped files. The fd must have
@@ -323,9 +349,9 @@ impl File {
     ///
     /// # Warning
     ///
-    /// This creates a read-only file wrapper. Do NOT use this with file descriptors
-    /// that weren't obtained from `File::fd()` on a read-only file. FAT files
-    /// cannot be reconstructed from file descriptors.
+    /// This creates a read-only file wrapper that will close the fd on drop.
+    /// Only use this when you want the `File` to take ownership of the fd.
+    /// FAT files cannot be reconstructed from file descriptors.
     ///
     /// Note: This does not validate that the fd is valid. Using an invalid fd
     /// will cause errors on subsequent operations.
@@ -337,6 +363,27 @@ impl File {
     /// Rust code should prefer holding onto the `File` directly.
     pub fn from_fd(fd: i32) -> Self {
         File::ReadOnly(RoFile::from_fd(fd))
+    }
+
+    /// Create a read-only File from a raw file descriptor.
+    ///
+    /// This is the unsafe version that matches [`std::os::fd::FromRawFd`].
+    ///
+    /// # Safety
+    ///
+    /// The `fd` must be a valid, open file descriptor that was obtained from
+    /// `File::into_raw_fd()` or `File::fd()` on a read-only file. The caller
+    /// transfers ownership to the returned `File`, which will close the fd
+    /// on drop. Passing an invalid fd, a closed fd, or a fd that is still
+    /// owned by another `File` may result in:
+    /// - Double-close (undefined behavior)
+    /// - Use-after-close
+    /// - Operating on an unrelated file descriptor
+    ///
+    /// FAT files cannot be reconstructed from file descriptors.
+    pub unsafe fn from_raw_fd(fd: RawFd) -> Self {
+        // SAFETY: Caller guarantees fd is valid and we're taking ownership.
+        File::ReadOnly(unsafe { RoFile::from_raw_fd(fd) })
     }
 
     /// Get the current position in the file.
@@ -467,6 +514,17 @@ impl RoFile {
         Self { fd }
     }
 
+    /// Create a new RoFile from a raw file descriptor.
+    ///
+    /// # Safety
+    ///
+    /// The `fd` must be a valid, open file descriptor that was obtained from
+    /// `RoFile::into_raw_fd()` or `RoFile::fd()`. The caller transfers ownership
+    /// to the returned `RoFile`, which will close the fd on drop.
+    pub(crate) unsafe fn from_raw_fd(fd: RawFd) -> Self {
+        Self { fd }
+    }
+
     /// Get the file descriptor number.
     pub fn fd(&self) -> i32 {
         self.fd
@@ -488,6 +546,17 @@ impl RoFile {
     pub fn remaining(&self) -> Result<u64, FsError> {
         let entry = fd::get_ro_fd(self.fd)?;
         Ok(entry.size().saturating_sub(entry.position()))
+    }
+
+    /// Consume the RoFile and return the raw file descriptor.
+    ///
+    /// This transfers ownership of the file descriptor to the caller.
+    /// The caller becomes responsible for closing it via `close()`.
+    /// The `Drop` implementation will NOT be called.
+    pub fn into_raw_fd(self) -> RawFd {
+        let fd: RawFd = self.fd;
+        core::mem::forget(self);
+        fd
     }
 }
 
