@@ -47,6 +47,8 @@ use crate::{Result, new_error};
 // +-------------------------------------------+
 // |             Guest Heap                    |
 // +-------------------------------------------+
+// |             Guard Page (4KiB)             |
+// +-------------------------------------------+
 // |             Output Data                   |
 // +-------------------------------------------+
 // |              Input Data                   |
@@ -324,12 +326,19 @@ impl SandboxMemoryLayout {
             input_data_buffer_offset + cfg.get_input_data_size(),
             PAGE_SIZE_USIZE,
         );
-        // make sure heap buffer starts at 4MB boundary
+
+        // make sure heap buffer starts at 4MB boundary but also take account of the fact that we want a guard page of 4K before the heap
+        // so we need to add an extra 4K to the offset before rounding up to 4MB
+        // in the write of the layout we will create a guard page immediately before the heap
+        // and this guarantees that the heap itself starts at a 4MB boundary
+        // and there is enough space for the guard page
+        // because we calculate the total memory size based on the offset at the end this is safe
         let guest_heap_buffer_offset = round_up_to(
-            output_data_buffer_offset + cfg.get_output_data_size(),
+            output_data_buffer_offset + cfg.get_output_data_size() + PAGE_SIZE_USIZE,
             PAGE_TABLE_SIZE_USIZE,
         );
-        // make sure guard page starts at 4K boundary
+        
+        // make sure post heap guard page starts at 4K boundary
         let guard_page_offset = round_up_to(guest_heap_buffer_offset + heap_size, PAGE_SIZE_USIZE);
         let guest_user_stack_buffer_offset = guard_page_offset + PAGE_SIZE_USIZE;
         // round up stack size to page size. This is needed for MemoryRegion
