@@ -704,11 +704,17 @@ impl SandboxMemoryLayout {
 
         let heap_guard_size = self.guest_heap_buffer_offset - heap_guard_offset;
 
-        let heap_offset = builder.push_page_aligned(
-            heap_guard_size,
-            MemoryRegionFlags::READ | MemoryRegionFlags::STACK_GUARD,
-            GuardPage,
-        );
+        // Only push the heap guard region if it has non-zero size.
+        // A zero-sized region would cause KVM to fail with EINVAL.
+        let heap_offset = if heap_guard_size > 0 {
+            builder.push_page_aligned(
+                heap_guard_size,
+                MemoryRegionFlags::READ | MemoryRegionFlags::STACK_GUARD,
+                GuardPage,
+            )
+        } else {
+            heap_guard_offset
+        };
 
         let expected_heap_offset = TryInto::<usize>::try_into(self.guest_heap_buffer_offset)?;
 
