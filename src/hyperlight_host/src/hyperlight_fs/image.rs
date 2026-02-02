@@ -285,6 +285,28 @@ impl HyperlightFSImage {
         &mut self.fat_mounts
     }
 
+    /// Get a mutable reference to a FAT image by its mount point.
+    ///
+    /// This allows writing files to a FAT mount before the sandbox is created.
+    ///
+    /// # Arguments
+    ///
+    /// * `mount_point` - The mount point path (e.g., "/" or "/data")
+    ///
+    /// # Returns
+    ///
+    /// A mutable reference to the `FatImage` if found, or `None` if no mount
+    /// exists at the given path.
+    #[cfg(unix)]
+    pub fn fat_mount_mut(&mut self, mount_point: &str) -> Option<&mut super::fat_image::FatImage> {
+        for mount in &mut self.fat_mounts {
+            if mount.mount_point() == mount_point {
+                return Some(mount.image_mut());
+            }
+        }
+        None
+    }
+
     /// Synchronously flush all FAT mounts to their backing files.
     ///
     /// This calls `msync(MS_SYNC)` on each FAT mount's mmap'd region,
