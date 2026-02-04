@@ -761,13 +761,17 @@ enum ResolvedPath {
 /// Resolve a path through the VFS to determine which backend handles it.
 fn resolve_path(path: &str) -> Result<ResolvedPath, FsError> {
     let vfs = manifest::vfs()?;
-    let (mount_idx, relative_path) = vfs.resolve(path)?;
+    
+    // Normalize the path first (handles relative paths, ., ..)
+    let normalized = vfs.normalize_path(path)?;
+    
+    let (mount_idx, relative_path) = vfs.resolve(&normalized)?;
 
     let mount = vfs.get_mount(mount_idx).ok_or(FsError::NotFound)?;
 
     match mount.backend() {
         MountBackend::ReadOnly => Ok(ResolvedPath::ReadOnly {
-            full_path: String::from(path),
+            full_path: normalized,
         }),
         MountBackend::Fat(_) => Ok(ResolvedPath::Fat {
             mount_idx,

@@ -395,7 +395,7 @@ impl HyperlightVm {
                 // ==== KILL() TIMING POINT 3: Before calling run() ====
                 // If kill() is called and ran to completion BEFORE this line executes:
                 //    - Will still do a VM entry, but signals will be sent until VM exits
-                log::info!("run vcpu vm");
+                //log::info!("run vcpu vm");
                 let result = self.vm.run_vcpu();
 
                 // End current host trace by closing the current span that captures traces

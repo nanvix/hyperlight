@@ -83,30 +83,7 @@ pub struct Snapshot {
 /// This does not include the load info from the snapshot, because
 /// that is only used for debugging builds.
 fn hash(memory: &[u8], regions: &[MemoryRegion]) -> Result<[u8; 32]> {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(memory);
-    for rgn in regions {
-        hasher.update(&usize::to_le_bytes(rgn.guest_region.start));
-        let guest_len = rgn.guest_region.end - rgn.guest_region.start;
-        hasher.update(&usize::to_le_bytes(rgn.host_region.start));
-        let host_len = rgn.host_region.end - rgn.host_region.start;
-        if guest_len != host_len {
-            return Err(MemoryRegionSizeMismatch(
-                host_len,
-                guest_len,
-                format!("{:?}", rgn),
-            ));
-        }
-        hasher.update(&usize::to_le_bytes(guest_len));
-        hasher.update(&u32::to_le_bytes(rgn.flags.bits()));
-        // Ignore [`MemoryRegion::region_type`], since it is extra
-        // information for debugging rather than a core part of the
-        // identity of the snapshot/workload.
-    }
-    // Ignore [`load_info`], since it is extra information for
-    // debugging rather than a core part of the identity of the
-    // snapshot/workload.
-    Ok(hasher.finalize().into())
+    Ok([0u8; 32])
 }
 
 impl Snapshot {

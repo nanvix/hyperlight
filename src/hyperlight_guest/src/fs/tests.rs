@@ -649,3 +649,233 @@ fn test_file_fd_returns_correct_value() {
     let fd2 = file2.fd();
     assert_ne!(fd, fd2, "Different opens should give different fds");
 }
+
+// ==================== Relative Path Tests ====================
+
+#[test]
+fn test_open_relative_path_not_found_returns_not_found() {
+    // Regression test: opening a relative path for a non-existent file should
+    // return NotFound, not InvalidPath. The VFS should normalize the relative
+    // path to an absolute path before looking up the file.
+    reset_fs();
+
+    let manifest = create_manifest(vec![InodeData::directory("/".to_string(), 0)]);
+
+    unsafe {
+        init_test_fs(&manifest);
+    }
+
+    // Opening a relative path that doesn't exist should return NotFound
+    let result = open("nonexistent.txt");
+    match result {
+        Err(FsError::NotFound) => (), // Expected
+        Err(e) => panic!(
+            "Opening non-existent relative path should return NotFound, got {:?}",
+            e
+        ),
+        Ok(_) => panic!("Opening non-existent file should fail"),
+    }
+}
+
+#[test]
+fn test_stat_relative_path_not_found_returns_not_found() {
+    // Regression test: stat on a relative path for a non-existent file should
+    // return NotFound, not InvalidPath.
+    reset_fs();
+
+    let manifest = create_manifest(vec![InodeData::directory("/".to_string(), 0)]);
+
+    unsafe {
+        init_test_fs(&manifest);
+    }
+
+    // stat on a relative path that doesn't exist should return NotFound
+    let result = stat("pyvenv.cfg");
+    assert_eq!(
+        result,
+        Err(FsError::NotFound),
+        "stat on non-existent relative path should return NotFound, not InvalidPath"
+    );
+}
+
+#[test]
+fn test_open_relative_path_finds_file() {
+    // Test that opening a file with a relative path works when the file exists.
+    reset_fs();
+
+    let file_content = b"Hello from relative path!";
+    TEST_FILE_DATA.write(file_content);
+
+    let guest_address = TEST_FILE_DATA.as_ptr();
+
+    let manifest = create_manifest(vec![
+        InodeData::directory("/".to_string(), 0),
+        InodeData::file(
+            "/config.txt".to_string(),
+            0,
+            guest_address,
+            file_content.len() as u64,
+        ),
+    ]);
+
+    unsafe {
+        init_test_fs(&manifest);
+    }
+
+    // CWD is "/" by default, so "config.txt" should resolve to "/config.txt"
+    let mut file = open("config.txt").expect("open with relative path should succeed");
+
+    // Verify we can read the file
+    let mut buf = [0u8; 64];
+    let n = file.read(&mut buf).expect("read failed");
+    assert_eq!(n, file_content.len());
+    assert_eq!(&buf[..n], file_content);
+}
+
+#[test]
+fn test_stat_relative_path_finds_file() {
+    // Test that stat with a relative path works when the file exists.
+    reset_fs();
+
+    let file_content = b"Stats test";
+    TEST_FILE_DATA.write(file_content);
+
+    let guest_address = TEST_FILE_DATA.as_ptr();
+
+    let manifest = create_manifest(vec![
+        InodeData::directory("/".to_string(), 0),
+        InodeData::file(
+            "/myfile.txt".to_string(),
+            0,
+            guest_address,
+            file_content.len() as u64,
+        ),
+    ]);
+
+    unsafe {
+        init_test_fs(&manifest);
+    }
+
+    // CWD is "/" by default, so "myfile.txt" should resolve to "/myfile.txt"
+    let st = stat("myfile.txt").expect("stat with relative path should succeed");
+    assert!(!st.is_dir);
+    assert_eq!(st.size, file_content.len() as u64);
+}
+
+#[test]
+fn test_relative_path_with_nested_directory_structure() {
+    // Test that relative paths work correctly with a nested directory structure
+    // that mimics a FAT mount at /lib/python with a ReadOnly mount at /.
+    // This validates that:
+    // 1. Relative paths from "/" resolve to files in the root ReadOnly mount
+    // 2. Files in /lib/python are accessible via their full path
+    reset_fs();
+
+    let root_file_content = b"root config";
+    let python_file_content = b"python config";
+    TEST_FILE_DATA.write(root_file_content);
+
+    let guest_address = TEST_FILE_DATA.as_ptr();
+
+    // Create a manifest with:
+    // - / (root directory)
+    // - /pyvenv.cfg (file at root - like Python looking for venv config)
+    // - /lib (directory)
+    // - /lib/python (directory - would be FAT mount in real scenario)
+    // - /lib/python/config.py (file in nested directory)
+    let manifest = create_manifest(vec![
+        InodeData::directory("/".to_string(), 0),
+        InodeData::file(
+            "/pyvenv.cfg".to_string(),
+            0,
+            guest_address,
+            root_file_content.len() as u64,
+        ),
+        InodeData::directory("/lib".to_string(), 0),
+        InodeData::directory("/lib/python".to_string(), 0),
+        InodeData::file(
+            "/lib/python/config.py".to_string(),
+            0,
+            guest_address,
+            python_file_content.len() as u64,
+        ),
+    ]);
+
+    unsafe {
+        init_test_fs(&manifest);
+    }
+
+    // Test 1: Relative path from root should find root file
+    let st = stat("pyvenv.cfg").expect("stat pyvenv.cfg from root should succeed");
+    assert!(!st.is_dir);
+
+    // Test 2: Absolute path to nested file should work
+    let st = stat("/lib/python/config.py").expect("stat absolute nested path should succeed");
+    assert!(!st.is_dir);
+
+    // Test 3: Relative path to non-existent file should return NotFound, not InvalidPath
+    let result = stat("nonexistent.cfg");
+    assert_eq!(
+        result,
+        Err(FsError::NotFound),
+        "Non-existent relative path should return NotFound"
+    );
+}
+
+#[test]
+fn test_relative_path_not_found_with_lib_python_structure() {
+    // Regression test: When /lib/python exists (like a FAT mount would be),
+    // a relative path lookup at root for a non-existent file should return
+    // NotFound, not InvalidPath.
+    //
+    // This simulates the Python startup scenario where:
+    // - FAT is mounted at /lib/python with the stdlib
+    // - Python opens "pyvenv.cfg" (relative path) from root
+    // - The file doesn't exist, so it should get NotFound (not InvalidPath)
+    reset_fs();
+
+    let file_content = b"some file";
+    TEST_FILE_DATA.write(file_content);
+
+    let guest_address = TEST_FILE_DATA.as_ptr();
+
+    // Create manifest with /lib/python structure but no pyvenv.cfg at root
+    let manifest = create_manifest(vec![
+        InodeData::directory("/".to_string(), 0),
+        InodeData::directory("/lib".to_string(), 0),
+        InodeData::directory("/lib/python".to_string(), 0),
+        InodeData::file(
+            "/lib/python/os.py".to_string(),
+            0,
+            guest_address,
+            file_content.len() as u64,
+        ),
+    ]);
+
+    unsafe {
+        init_test_fs(&manifest);
+    }
+
+    // Relative path "pyvenv.cfg" from root should normalize to "/pyvenv.cfg"
+    // and return NotFound (not InvalidPath)
+    let result = stat("pyvenv.cfg");
+    assert_eq!(
+        result,
+        Err(FsError::NotFound),
+        "stat('pyvenv.cfg') should return NotFound, not InvalidPath"
+    );
+
+    let result = open("pyvenv.cfg");
+    match result {
+        Err(FsError::NotFound) => (), // Expected
+        Err(e) => panic!(
+            "open('pyvenv.cfg') should return NotFound, got {:?}",
+            e
+        ),
+        Ok(_) => panic!("open('pyvenv.cfg') should fail for non-existent file"),
+    }
+
+    // But absolute path to existing file should work
+    let st = stat("/lib/python/os.py").expect("stat /lib/python/os.py should succeed");
+    assert!(!st.is_dir);
+}

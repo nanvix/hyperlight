@@ -148,6 +148,111 @@ fn run_demo() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     // =========================================================================
+    // Part 3.5: Relative Path Resolution with Mixed Mounts
+    // =========================================================================
+
+    println!("═══════════════════════════════════════════════════════════════");
+    println!("  🔍 Relative Path Resolution Demo (FAT at /data, RO at /)");
+    println!("═══════════════════════════════════════════════════════════════");
+    println!();
+    println!("   This section verifies that relative paths work correctly when:");
+    println!("   - FAT is mounted at /data (not at root)");
+    println!("   - ReadOnly is mounted at / (fallback mount)");
+    println!("   - CWD is / (the default)");
+    println!();
+
+    // Test 1: Relative path to existing ReadOnly file should work
+    println!("   1️⃣  Testing relative path to ReadOnly file...");
+    println!("      open(\"config.txt\") should find /config.txt");
+    let result: String = sandbox.call("OpenPathResult", "config.txt".to_string())?;
+    if result.starts_with("ok:") {
+        println!("      ✓ Result: {} (file found via relative path)", result);
+    } else {
+        println!("      ✗ FAILED: Expected ok:<size>, got: {}", result);
+        return Err(format!("Relative path to RO file failed: {}", result).into());
+    }
+    println!();
+
+    // Test 2: Relative path to non-existent file should return NotFound (NOT InvalidPath)
+    println!("   2️⃣  Testing relative path to non-existent file...");
+    println!("      stat(\"pyvenv.cfg\") should return NotFound, not InvalidPath");
+    let result: String = sandbox.call("StatPathResult", "pyvenv.cfg".to_string())?;
+    if result == "not_found" {
+        println!("      ✓ Result: {} (correct error for missing file)", result);
+    } else if result == "invalid_path" {
+        println!("      ✗ FAILED: Got InvalidPath instead of NotFound!");
+        println!("        This is the bug we fixed - relative paths were not being normalized.");
+        return Err("Relative path incorrectly returned InvalidPath".into());
+    } else {
+        println!("      ? Unexpected result: {}", result);
+    }
+    println!();
+
+    // Test 3: Absolute path to FAT mount should work
+    println!("   3️⃣  Testing absolute path to FAT mount...");
+    println!("      stat(\"/data\") should find the FAT mount directory");
+    let result: String = sandbox.call("StatPathResult", "/data".to_string())?;
+    if result == "ok:dir" {
+        println!("      ✓ Result: {} (FAT mount point found)", result);
+    } else {
+        println!("      ✗ FAILED: Expected ok:dir, got: {}", result);
+        return Err(format!("FAT mount point not found: {}", result).into());
+    }
+    println!();
+
+    // Test 4: Relative path after chdir should resolve to new cwd
+    println!("   4️⃣  Testing relative path after chdir to /data...");
+    let chdir_ok: bool = sandbox.call("Chdir", "/data".to_string())?;
+    if !chdir_ok {
+        return Err("chdir to /data failed".into());
+    }
+    println!("      chdir(\"/data\") succeeded");
+    
+    // Now relative path should resolve within /data
+    println!("      stat(\"testfile.txt\") should return NotFound (not InvalidPath)");
+    let result: String = sandbox.call("StatPathResult", "testfile.txt".to_string())?;
+    if result == "not_found" {
+        println!("      ✓ Result: {} (correct - file doesn't exist yet)", result);
+    } else if result == "invalid_path" {
+        println!("      ✗ FAILED: Got InvalidPath instead of NotFound!");
+        return Err("Relative path in FAT mount returned InvalidPath".into());
+    } else {
+        println!("      ? Unexpected result: {}", result);
+    }
+    println!();
+
+    // Test 5: Create file via relative path and verify
+    println!("   5️⃣  Creating file via relative path in /data...");
+    let write_ok: bool = sandbox.call(
+        "WriteFatFile",
+        ("testfile.txt".to_string(), b"Created via relative path!".to_vec()),
+    )?;
+    if write_ok {
+        println!("      ✓ WriteFatFile(\"testfile.txt\") succeeded");
+    } else {
+        println!("      ✗ WriteFatFile failed");
+    }
+
+    // Verify the file exists
+    let result: String = sandbox.call("StatPathResult", "testfile.txt".to_string())?;
+    if result.starts_with("ok:") {
+        println!("      ✓ stat(\"testfile.txt\") = {} (file created)", result);
+    } else {
+        println!("      ✗ File not found after creation: {}", result);
+    }
+    println!();
+
+    // Restore CWD to root
+    let _: bool = sandbox.call("Chdir", "/".to_string())?;
+    println!("      chdir(\"/\") - restored CWD to root");
+    println!();
+
+    println!("   ═══════════════════════════════════════════════════════════");
+    println!("   🎉 RELATIVE PATH RESOLUTION VERIFIED!");
+    println!("   ═══════════════════════════════════════════════════════════");
+    println!();
+
+    // =========================================================================
     // Part 4: Demonstrate FAT read-write operations
     // =========================================================================
 

@@ -325,6 +325,60 @@ fn exists_fat(path: String) -> i32 {
     }
 }
 
+/// Tests stat on a path and returns detailed result.
+/// Returns a string describing the result:
+/// - "ok:<size>" for existing files
+/// - "ok:dir" for existing directories  
+/// - "not_found" for NotFound error
+/// - "invalid_path" for InvalidPath error
+/// - "error:<description>" for other errors
+#[guest_function("StatPathResult")]
+fn stat_path_result(path: String) -> String {
+    use fs::FsError;
+    
+    if !fs::is_initialized() {
+        return "error:not_initialized".to_string();
+    }
+    match fs::stat(&path) {
+        Ok(stat) => {
+            if stat.is_dir {
+                "ok:dir".to_string()
+            } else {
+                format!("ok:{}", stat.size)
+            }
+        }
+        Err(FsError::NotFound) => "not_found".to_string(),
+        Err(FsError::InvalidPath) => "invalid_path".to_string(),
+        Err(e) => format!("error:{:?}", e),
+    }
+}
+
+/// Tests open on a path and returns detailed result.
+/// Returns a string describing the result:
+/// - "ok:<size>" for successful open (returns file size)
+/// - "not_found" for NotFound error
+/// - "invalid_path" for InvalidPath error
+/// - "error:<description>" for other errors
+#[guest_function("OpenPathResult")]
+fn open_path_result(path: String) -> String {
+    use fs::FsError;
+    
+    if !fs::is_initialized() {
+        return "error:not_initialized".to_string();
+    }
+    match fs::open(&path) {
+        Ok(mut file) => {
+            match file.size() {
+                Ok(size) => format!("ok:{}", size),
+                Err(e) => format!("error:size:{:?}", e),
+            }
+        }
+        Err(FsError::NotFound) => "not_found".to_string(),
+        Err(FsError::InvalidPath) => "invalid_path".to_string(),
+        Err(e) => format!("error:{:?}", e),
+    }
+}
+
 /// Gets the current working directory.
 /// Returns empty string on error.
 #[guest_function("GetCwd")]
