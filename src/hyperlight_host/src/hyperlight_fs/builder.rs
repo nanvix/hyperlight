@@ -523,6 +523,9 @@ impl<F> HyperlightFSBuilder<F> {
             "Adding file to HyperlightFS"
         );
 
+        // Ensure parent directories are synthesized (including root "/")
+        self.ensure_parent_dirs_for_file(&file_entry.guest_path);
+
         self.guest_paths_seen.insert(file_entry.guest_path.clone());
         self.files.push(file_entry);
 
@@ -611,6 +614,42 @@ impl<F> HyperlightFSBuilder<F> {
             files: entries,
             total_size,
         })
+    }
+
+    /// Ensure parent directory inodes are synthesized for a file path.
+    ///
+    /// When `add_file()` is called with e.g. `/__main__.py`, we need to ensure
+    /// a `/` directory inode exists so that `stat("/")` and `read_dir("/")`
+    /// work in the guest. Similarly, for `/a/b/c.txt`, we need `/`, `/a`, `/a/b`.
+    ///
+    /// This is the same logic as `DirectoryBuilder::ensure_parent_dirs()` but
+    /// includes the root `/` directory and operates on the builder's files list.
+    fn ensure_parent_dirs_for_file(&mut self, guest_path: &str) {
+        let path = Path::new(guest_path);
+
+        // Collect ancestors we haven't seen (skip the file itself)
+        let new_dirs: Vec<_> = path
+            .ancestors()
+            .skip(1) // skip the file itself
+            .filter(|p| !p.as_os_str().is_empty())
+            .filter(|p| {
+                let dir_path = normalize_guest_path(&p.to_string_lossy());
+                // Only add if not already in our files list
+                !self.files.iter().any(|f| f.guest_path == dir_path)
+            })
+            .map(|p| p.to_path_buf())
+            .collect();
+
+        // Add directories in reverse order (root first)
+        for dir_path in new_dirs.into_iter().rev() {
+            let guest_dir = normalize_guest_path(&dir_path.to_string_lossy());
+            self.files.push(MappedFile {
+                host_path: PathBuf::new(), // No host path for synthetic dirs
+                guest_path: guest_dir,
+                size: 0,
+                is_dir: true,
+            });
+        }
     }
 
     /// Validate and normalize a mount point (root "/" is allowed).
@@ -1567,11 +1606,11 @@ impl<F> DirectoryBuilder<F> {
     ) {
         let path = Path::new(guest_path);
 
-        // Collect ancestors we haven't seen (skip the file itself and root)
+        // Collect ancestors we haven't seen (skip the file itself, include root)
         let new_dirs: Vec<_> = path
             .ancestors()
             .skip(1) // skip the file itself
-            .filter(|p| !p.as_os_str().is_empty() && *p != Path::new("/"))
+            .filter(|p| !p.as_os_str().is_empty())
             .filter(|p| dirs_seen.insert(p.to_path_buf()))
             .map(|p| p.to_path_buf())
             .collect();
@@ -1762,9 +1801,21 @@ mod tests {
             .unwrap();
 
         let manifest = builder.file_summary().unwrap();
-        assert_eq!(manifest.files.len(), 1);
-        assert_eq!(manifest.files[0].guest_path, "/guest/test.txt");
-        assert_eq!(manifest.files[0].size, 5);
+        // Should have: "/" dir, "/guest" dir, "/guest/test.txt" file
+        assert_eq!(manifest.files.len(), 3);
+        // Find the actual file entry
+        let file_entry = manifest
+            .files
+            .iter()
+            .find(|f| f.guest_path == "/guest/test.txt")
+            .expect("file entry not found");
+        assert_eq!(file_entry.size, 5);
+        // Verify parent dirs were synthesized
+        assert!(manifest.files.iter().any(|f| f.guest_path == "/" && f.is_dir));
+        assert!(manifest
+            .files
+            .iter()
+            .any(|f| f.guest_path == "/guest" && f.is_dir));
     }
 
     #[test]
@@ -2342,7 +2393,8 @@ guest = "/file.txt"
                 .add_empty_fat_mount("/data", MIN_FAT_IMAGE_SIZE)
                 .expect("Failed to add FAT mount");
 
-            assert_eq!(builder.files.len(), 1);
+            // files includes: "/" dir (synthetic) + "/config.json" file
+            assert_eq!(builder.files.len(), 2);
             assert_eq!(builder.fat_mounts.len(), 1);
         }
 

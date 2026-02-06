@@ -158,15 +158,50 @@ pub struct Vfs {
 
     /// Current working directory (always absolute, always ends without "/").
     cwd: String,
+
+    /// Home directory for tilde expansion (always absolute, no trailing slash).
+    /// Defaults to "/". When a path starts with "~" or "~/", it is replaced
+    /// with this directory.
+    home_dir: String,
 }
 
 impl Vfs {
-    /// Create a new empty VFS with cwd set to "/".
+    /// Create a new empty VFS with cwd set to "/" and home_dir set to "/".
     pub fn new() -> Self {
         Self {
             mounts: Vec::new(),
             cwd: String::from("/"),
+            home_dir: String::from("/"),
         }
+    }
+
+    /// Set the home directory for tilde expansion.
+    ///
+    /// # Arguments
+    ///
+    /// * `home` - Absolute path to use as home directory (e.g., "/root", "/home/user")
+    ///
+    /// # Errors
+    ///
+    /// Returns `FsError::InvalidPath` if `home` is not absolute.
+    pub fn set_home_dir(&mut self, home: &str) -> Result<(), FsError> {
+        if !home.starts_with('/') {
+            return Err(FsError::InvalidPath);
+        }
+        // Normalize: remove trailing slash (unless root)
+        let normalized = if home.len() > 1 && home.ends_with('/') {
+            &home[..home.len() - 1]
+        } else {
+            home
+        };
+        self.home_dir = String::from(normalized);
+        Ok(())
+    }
+
+    /// Get the home directory.
+    #[inline]
+    pub fn home_dir(&self) -> &str {
+        &self.home_dir
     }
 
     /// Add a mount point.
@@ -217,24 +252,28 @@ impl Vfs {
 
     /// Change the current working directory.
     ///
-    /// Note: This validates that the path resolves to a mount, but does not
-    /// verify that the directory actually exists on the filesystem. Full
-    /// validation requires going through the mount backend which will happen
-    /// when operations are performed in this directory.
+    /// Note: This validates that the path resolves to a mount or is a parent
+    /// of a mount point, but does not verify that the directory actually exists
+    /// on the filesystem. Full validation requires going through the mount
+    /// backend which will happen when operations are performed in this directory.
     ///
     /// # Errors
     ///
     /// Returns `FsError::InvalidPath` if the path is malformed.
-    /// Returns `FsError::NotFound` if no mount handles this path.
+    /// Returns `FsError::NotFound` if no mount handles this path and the path
+    /// is not a parent of any mount point.
     pub fn set_cwd(&mut self, path: &str) -> Result<(), FsError> {
         let normalized = self.normalize_path(path)?;
 
-        // Verify the path resolves to a valid mount point.
+        // Verify the path resolves to a valid mount point or is a parent of one.
         // This doesn't verify the directory exists on disk, but ensures
-        // the path is at least within a mounted filesystem.
+        // the path is at least within or above a mounted filesystem.
         if !normalized.is_empty() && normalized != "/" {
-            // Check that a mount handles this path
-            let _ = self.resolve(&normalized)?;
+            // Check that a mount handles this path, or the path is a parent
+            // of a mount point (virtual directory).
+            if self.resolve(&normalized).is_err() && !self.is_mount_parent(&normalized) {
+                return Err(FsError::NotFound);
+            }
         }
 
         self.cwd = normalized;
@@ -269,15 +308,28 @@ impl Vfs {
             return Err(FsError::InvalidPath);
         }
 
-        // Start with absolute path
-        let abs_path = if path.starts_with('/') {
+        // Expand tilde: "~" -> home_dir, "~/foo" -> home_dir + "/foo"
+        let expanded = if path == "~" {
+            self.home_dir.clone()
+        } else if let Some(rest) = path.strip_prefix("~/") {
+            if self.home_dir == "/" {
+                alloc::format!("/{}", rest)
+            } else {
+                alloc::format!("{}/{}", self.home_dir, rest)
+            }
+        } else {
             String::from(path)
+        };
+
+        // Start with absolute path
+        let abs_path = if expanded.starts_with('/') {
+            expanded
         } else {
             // Make absolute by prepending cwd
             if self.cwd == "/" {
-                alloc::format!("/{}", path)
+                alloc::format!("/{}", expanded)
             } else {
-                alloc::format!("{}/{}", self.cwd, path)
+                alloc::format!("{}/{}", self.cwd, expanded)
             }
         };
 
@@ -387,6 +439,77 @@ impl Vfs {
     pub fn mounts(&self) -> impl Iterator<Item = &Mount> {
         self.mounts.iter()
     }
+
+    /// Check if a path is a parent prefix of any mount point.
+    ///
+    /// This is used to synthesize virtual directories for paths that don't
+    /// directly resolve to any mount, but are ancestors of one or more mount
+    /// points. For example, if a FAT is mounted at
+    /// `/root/.local/lib/python3.12/site-packages/testdir`, then
+    /// `/root/.local/lib/python3.12/site-packages` is a virtual parent.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Normalized absolute path (no trailing slash unless root).
+    ///
+    /// # Returns
+    ///
+    /// `true` if at least one mount point starts with `path + "/"`.
+    pub fn is_mount_parent(&self, path: &str) -> bool {
+        if path == "/" {
+            // Root is parent of all mounts (but usually handled elsewhere).
+            return !self.mounts.is_empty();
+        }
+
+        let prefix_with_slash = alloc::format!("{}/", path);
+        self.mounts
+            .iter()
+            .any(|m| m.path.starts_with(&prefix_with_slash))
+    }
+
+    /// List the immediate virtual children of a path that is a mount parent.
+    ///
+    /// For example, given mounts at:
+    ///   - `/root/.local/lib/python3.12/site-packages/testdir`
+    ///   - `/root/.local/lib/python3.12/site-packages/other`
+    ///
+    /// Calling `virtual_children("/root/.local/lib/python3.12/site-packages")`
+    /// returns `["testdir", "other"]`.
+    ///
+    /// Calling `virtual_children("/root")` returns `[".local"]`.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Normalized absolute path.
+    ///
+    /// # Returns
+    ///
+    /// A deduplicated list of immediate child directory names.
+    pub fn virtual_children(&self, path: &str) -> Vec<String> {
+        let mut children: Vec<String> = Vec::new();
+
+        let prefix = if path == "/" {
+            String::from("/")
+        } else {
+            alloc::format!("{}/", path)
+        };
+
+        for mount in &self.mounts {
+            if let Some(rest) = mount.path.strip_prefix(prefix.as_str()) {
+                // rest is the portion after the parent prefix.
+                // The immediate child is the first path component.
+                let child = rest.split('/').next().unwrap_or(rest);
+                if !child.is_empty() {
+                    let child_str = String::from(child);
+                    if !children.contains(&child_str) {
+                        children.push(child_str);
+                    }
+                }
+            }
+        }
+
+        children
+    }
 }
 
 impl Default for Vfs {
@@ -397,6 +520,8 @@ impl Default for Vfs {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
     use super::*;
 
     #[test]
@@ -530,5 +655,140 @@ mod tests {
         let result = vfs.add_mount(Mount::new(String::from("/data"), MountBackend::ReadOnly));
 
         assert!(matches!(result, Err(FsError::AlreadyExists)));
+    }
+
+    #[test]
+    fn test_tilde_expansion_default_home() {
+        let vfs = Vfs::new();
+
+        // Default home is "/"
+        assert_eq!(vfs.home_dir(), "/");
+
+        // "~" -> "/"
+        assert_eq!(vfs.normalize_path("~").unwrap(), "/");
+
+        // "~/foo" -> "/foo"
+        assert_eq!(vfs.normalize_path("~/foo").unwrap(), "/foo");
+
+        // "~/foo/bar" -> "/foo/bar"
+        assert_eq!(vfs.normalize_path("~/foo/bar").unwrap(), "/foo/bar");
+    }
+
+    #[test]
+    fn test_tilde_expansion_custom_home() {
+        let mut vfs = Vfs::new();
+        vfs.set_home_dir("/root").unwrap();
+
+        assert_eq!(vfs.home_dir(), "/root");
+
+        // "~" -> "/root"
+        assert_eq!(vfs.normalize_path("~").unwrap(), "/root");
+
+        // "~/foo" -> "/root/foo"
+        assert_eq!(vfs.normalize_path("~/foo").unwrap(), "/root/foo");
+
+        // "~/.local" -> "/root/.local"
+        assert_eq!(vfs.normalize_path("~/.local").unwrap(), "/root/.local");
+    }
+
+    #[test]
+    fn test_tilde_expansion_no_expansion_for_non_tilde() {
+        let mut vfs = Vfs::new();
+        vfs.set_home_dir("/root").unwrap();
+
+        // Absolute paths should not be affected
+        assert_eq!(vfs.normalize_path("/foo").unwrap(), "/foo");
+
+        // Relative paths starting with ~ in the middle should not expand
+        assert_eq!(vfs.normalize_path("/a/~/b").unwrap(), "/a/~/b");
+    }
+
+    #[test]
+    fn test_set_home_dir_validation() {
+        let mut vfs = Vfs::new();
+
+        // Relative paths should fail
+        assert!(vfs.set_home_dir("root").is_err());
+
+        // Absolute paths should succeed
+        assert!(vfs.set_home_dir("/root").is_ok());
+        assert!(vfs.set_home_dir("/").is_ok());
+
+        // Trailing slash should be stripped
+        vfs.set_home_dir("/root/").unwrap();
+        assert_eq!(vfs.home_dir(), "/root");
+    }
+
+    #[test]
+    fn test_is_mount_parent() {
+        let mut vfs = Vfs::new();
+        vfs.add_mount(Mount::new(
+            String::from("/root/.local/lib/python3.12/site-packages/testdir"),
+            MountBackend::ReadOnly,
+        ))
+        .unwrap();
+
+        // Direct parents of the mount path should be recognized.
+        assert!(vfs.is_mount_parent("/root"));
+        assert!(vfs.is_mount_parent("/root/.local"));
+        assert!(vfs.is_mount_parent("/root/.local/lib"));
+        assert!(vfs.is_mount_parent("/root/.local/lib/python3.12"));
+        assert!(vfs.is_mount_parent("/root/.local/lib/python3.12/site-packages"));
+
+        // The mount path itself is NOT a parent (it's the mount itself).
+        assert!(!vfs.is_mount_parent(
+            "/root/.local/lib/python3.12/site-packages/testdir"
+        ));
+
+        // Unrelated paths should not match.
+        assert!(!vfs.is_mount_parent("/other"));
+        assert!(!vfs.is_mount_parent("/root/.localx"));
+    }
+
+    #[test]
+    fn test_virtual_children() {
+        let mut vfs = Vfs::new();
+        vfs.add_mount(Mount::new(
+            String::from("/root/.local/lib/python3.12/site-packages/testdir"),
+            MountBackend::ReadOnly,
+        ))
+        .unwrap();
+        vfs.add_mount(Mount::new(
+            String::from("/root/.local/lib/python3.12/site-packages/other"),
+            MountBackend::ReadOnly,
+        ))
+        .unwrap();
+
+        // Children of site-packages should list both mount children.
+        let children =
+            vfs.virtual_children("/root/.local/lib/python3.12/site-packages");
+        assert_eq!(children.len(), 2);
+        assert!(children.contains(&String::from("testdir")));
+        assert!(children.contains(&String::from("other")));
+
+        // Children of /root should be ".local".
+        let children = vfs.virtual_children("/root");
+        assert_eq!(children, vec![String::from(".local")]);
+
+        // Children of /root/.local/lib should be "python3.12".
+        let children = vfs.virtual_children("/root/.local/lib");
+        assert_eq!(children, vec![String::from("python3.12")]);
+    }
+
+    #[test]
+    fn test_set_cwd_to_mount_parent() {
+        let mut vfs = Vfs::new();
+        vfs.add_mount(Mount::new(
+            String::from("/root/.local/lib/python3.12/site-packages/testdir"),
+            MountBackend::ReadOnly,
+        ))
+        .unwrap();
+
+        // Setting cwd to a parent of a mount should succeed.
+        assert!(vfs.set_cwd("/root/.local/lib/python3.12/site-packages").is_ok());
+        assert_eq!(vfs.cwd(), "/root/.local/lib/python3.12/site-packages");
+
+        // Setting cwd to an unrelated path should fail.
+        assert!(vfs.set_cwd("/nowhere").is_err());
     }
 }

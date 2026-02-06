@@ -156,9 +156,9 @@ impl InodeData {
         self.inode_type == InodeType::File
     }
 
-    /// Check if this inode is a directory.
+    /// Check if this inode is a directory (or a FAT mount point, which acts as a directory).
     pub fn is_dir(&self) -> bool {
-        self.inode_type == InodeType::Directory
+        self.inode_type == InodeType::Directory || self.inode_type == InodeType::FatMount
     }
 
     /// Check if this inode is a FAT mount.

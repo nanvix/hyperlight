@@ -756,27 +756,64 @@ enum ResolvedPath {
         /// Path relative to the mount point.
         relative_path: String,
     },
+    /// Path is a virtual parent directory of one or more mount points.
+    ///
+    /// This happens when a mount exists at a deeply nested path and the
+    /// requested path is an ancestor. For example, if a FAT is mounted at
+    /// `/root/.local/lib/python3.12/site-packages/testdir`, then
+    /// `/root/.local/lib/python3.12/site-packages` resolves as VirtualDir.
+    VirtualDir {
+        /// The normalized absolute path.
+        full_path: String,
+    },
 }
 
 /// Resolve a path through the VFS to determine which backend handles it.
 fn resolve_path(path: &str) -> Result<ResolvedPath, FsError> {
     let vfs = manifest::vfs()?;
-    
+
     // Normalize the path first (handles relative paths, ., ..)
     let normalized = vfs.normalize_path(path)?;
-    
-    let (mount_idx, relative_path) = vfs.resolve(&normalized)?;
 
-    let mount = vfs.get_mount(mount_idx).ok_or(FsError::NotFound)?;
+    match vfs.resolve(&normalized) {
+        Ok((mount_idx, relative_path)) => {
+            let mount = vfs.get_mount(mount_idx).ok_or(FsError::NotFound)?;
 
-    match mount.backend() {
-        MountBackend::ReadOnly => Ok(ResolvedPath::ReadOnly {
-            full_path: normalized,
-        }),
-        MountBackend::Fat(_) => Ok(ResolvedPath::Fat {
-            mount_idx,
-            relative_path,
-        }),
+            match mount.backend() {
+                MountBackend::ReadOnly => {
+                    // If the path is a non-empty relative path within a ReadOnly
+                    // mount AND it's a parent prefix of a deeper mount point,
+                    // treat it as a virtual directory. This handles the case where
+                    // "/" catches everything but "/root" is actually a virtual
+                    // parent of "/root/.local/lib/.../testdir".
+                    if !relative_path.is_empty() && vfs.is_mount_parent(&normalized) {
+                        Ok(ResolvedPath::VirtualDir {
+                            full_path: normalized,
+                        })
+                    } else {
+                        Ok(ResolvedPath::ReadOnly {
+                            full_path: normalized,
+                        })
+                    }
+                }
+                MountBackend::Fat(_) => Ok(ResolvedPath::Fat {
+                    mount_idx,
+                    relative_path,
+                }),
+            }
+        }
+        Err(FsError::NotFound) => {
+            // Path didn't match any mount directly. Check if it's a parent
+            // prefix of a mount point (virtual directory).
+            if vfs.is_mount_parent(&normalized) {
+                Ok(ResolvedPath::VirtualDir {
+                    full_path: normalized,
+                })
+            } else {
+                Err(FsError::NotFound)
+            }
+        }
+        Err(e) => Err(e),
     }
 }
 
@@ -860,6 +897,10 @@ fn open_with_options(
                 Err(FsError::IoError)
             }
         }
+        ResolvedPath::VirtualDir { .. } => {
+            // Cannot open a virtual parent directory as a file.
+            Err(FsError::NotAFile)
+        }
     }
 }
 
@@ -914,6 +955,13 @@ pub fn stat(path: &str) -> Result<Stat, FsError> {
                 Err(FsError::IoError)
             }
         }
+        ResolvedPath::VirtualDir { .. } => {
+            // Virtual parent directory: synthesized from mount point ancestry.
+            Ok(Stat {
+                size: 0,
+                is_dir: true,
+            })
+        }
     }
 }
 
@@ -955,6 +1003,10 @@ pub fn mkdir(path: &str) -> Result<(), FsError> {
                 Err(FsError::IoError)
             }
         }
+        ResolvedPath::VirtualDir { .. } => {
+            // Virtual parent directory already exists implicitly.
+            Err(FsError::AlreadyExists)
+        }
     }
 }
 
@@ -986,6 +1038,10 @@ pub fn rmdir(path: &str) -> Result<(), FsError> {
                 Err(FsError::IoError)
             }
         }
+        ResolvedPath::VirtualDir { .. } => {
+            // Cannot remove a virtual parent directory.
+            Err(FsError::ReadOnly)
+        }
     }
 }
 
@@ -1016,6 +1072,10 @@ pub fn unlink(path: &str) -> Result<(), FsError> {
                 Err(FsError::IoError)
             }
         }
+        ResolvedPath::VirtualDir { .. } => {
+            // Cannot unlink a virtual parent directory.
+            Err(FsError::ReadOnly)
+        }
     }
 }
 
@@ -1032,11 +1092,31 @@ pub fn unlink(path: &str) -> Result<(), FsError> {
 pub fn read_dir(path: &str) -> Result<Vec<DirEntry>, FsError> {
     use alloc::string::ToString;
 
-    match resolve_path(path)? {
+    let resolved = resolve_path(path)?;
+
+    // Determine the normalized full path for virtual children lookup.
+    let full_path_for_virtual = match &resolved {
+        ResolvedPath::ReadOnly { full_path } => Some(full_path.clone()),
+        ResolvedPath::Fat {
+            mount_idx,
+            relative_path,
+        } => {
+            if relative_path.is_empty() {
+                // At mount root - reconstruct the full path.
+                let vfs = manifest::vfs()?;
+                vfs.get_mount(*mount_idx).map(|m| m.path().to_string())
+            } else {
+                None // Inside a FAT mount, virtual children don't apply.
+            }
+        }
+        ResolvedPath::VirtualDir { full_path } => Some(full_path.clone()),
+    };
+
+    let mut entries: Vec<DirEntry> = match resolved {
         ResolvedPath::ReadOnly { full_path } => {
             let children = manifest::list_dir(&full_path)?;
 
-            let entries: Vec<DirEntry> = children
+            children
                 .into_iter()
                 .map(|inode| {
                     let name = inode
@@ -1052,9 +1132,7 @@ pub fn read_dir(path: &str) -> Result<Vec<DirEntry>, FsError> {
                         size: inode.size,
                     }
                 })
-                .collect();
-
-            Ok(entries)
+                .collect()
         }
         ResolvedPath::Fat {
             mount_idx,
@@ -1073,21 +1151,53 @@ pub fn read_dir(path: &str) -> Result<Vec<DirEntry>, FsError> {
 
                 let fat_entries = fat.read_dir(fat_path)?;
 
-                let entries: Vec<DirEntry> = fat_entries
+                fat_entries
                     .into_iter()
                     .map(|e| DirEntry {
                         name: e.name,
                         is_dir: e.is_dir,
                         size: e.size,
                     })
-                    .collect();
-
-                Ok(entries)
+                    .collect()
             } else {
-                Err(FsError::IoError)
+                return Err(FsError::IoError);
+            }
+        }
+        ResolvedPath::VirtualDir { full_path } => {
+            // Virtual parent directory: list immediate child components
+            // that lead toward mount points.
+            let vfs = manifest::vfs()?;
+            let children = vfs.virtual_children(&full_path);
+
+            children
+                .into_iter()
+                .map(|name| DirEntry {
+                    name,
+                    is_dir: true,
+                    size: 0,
+                })
+                .collect()
+        }
+    };
+
+    // Merge virtual children from deeper mount points.
+    // For example, if we're listing "/" and there's a mount at
+    // /root/.local/lib/.../testdir, then "root" should appear.
+    if let Some(dir_path) = full_path_for_virtual {
+        let vfs = manifest::vfs()?;
+        let virtual_children = vfs.virtual_children(&dir_path);
+        for child_name in virtual_children {
+            if !entries.iter().any(|e| e.name == child_name) {
+                entries.push(DirEntry {
+                    name: child_name,
+                    is_dir: true,
+                    size: 0,
+                });
             }
         }
     }
+
+    Ok(entries)
 }
 
 /// Rename a file or directory.
@@ -1130,10 +1240,11 @@ pub fn rename(old_path: &str, new_path: &str) -> Result<(), FsError> {
                 Err(FsError::IoError)
             }
         }
-        // Read-only mounts don't support rename
-        (ResolvedPath::ReadOnly { .. }, _) | (_, ResolvedPath::ReadOnly { .. }) => {
-            Err(FsError::ReadOnly)
-        }
+        // Read-only and virtual directory mounts don't support rename
+        (ResolvedPath::ReadOnly { .. }, _)
+        | (_, ResolvedPath::ReadOnly { .. })
+        | (ResolvedPath::VirtualDir { .. }, _)
+        | (_, ResolvedPath::VirtualDir { .. }) => Err(FsError::ReadOnly),
     }
 }
 
