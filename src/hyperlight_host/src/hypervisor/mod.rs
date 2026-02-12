@@ -26,6 +26,10 @@ pub(crate) mod hyperv_linux;
 #[cfg(target_os = "windows")]
 pub(crate) mod hyperv_windows;
 
+/// Userspace PIC/PIT emulation for MSHV
+#[cfg(all(mshv3, feature = "hw-interrupts"))]
+pub(crate) mod pic_pit;
+
 /// GDB debugging support
 #[cfg(gdb)]
 pub(crate) mod gdb;
@@ -69,6 +73,9 @@ pub(crate) enum HyperlightExit {
     Halt(),
     /// The vCPU has issued a write to the given port with the given value
     IoOut(u16, Vec<u8>),
+    /// The vCPU has issued a read from the given port (access_size in bytes)
+    #[allow(dead_code)]
+    IoIn(u16, u8),
     /// The vCPU tried to read from the given (unmapped) addr
     MmioRead(u64),
     /// The vCPU tried to write to the given (unmapped) addr

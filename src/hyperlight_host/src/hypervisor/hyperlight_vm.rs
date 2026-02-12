@@ -435,6 +435,9 @@ impl HyperlightVm {
                 Ok(HyperlightExit::IoOut(port, data)) => {
                     self.handle_io(mem_mgr, host_funcs, port, data)?
                 }
+                Ok(HyperlightExit::IoIn(port, _)) => {
+                    break Err(new_error!("Unhandled IO IN on port {:#x}", port));
+                }
                 Ok(HyperlightExit::MmioRead(addr)) => {
                     let all_regions = self.sandbox_regions.iter().chain(self.get_mapped_regions());
                     match get_memory_access_violation(
