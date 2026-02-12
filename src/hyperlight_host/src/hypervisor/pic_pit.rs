@@ -19,15 +19,13 @@ limitations under the License.
 //! KVM provides in-kernel PIC/PIT via `create_irq_chip()` and `create_pit2()`.
 //! MSHV has no equivalent, so we emulate just enough to support Nanvix's
 //! timer interrupt requirements.
+//!
+//! Timer interrupt injection is done synchronously in the vCPU run loop
+//! via `HV_REGISTER_PENDING_INTERRUPTION`, rather than from a background
+//! thread (which would require `request_virtual_interrupt` / ROOT_HVCALL
+//! permissions that are not available in non-root partitions).
 
-use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
-
-use mshv_bindings::hv_interrupt_type_HV_X64_INTERRUPT_TYPE_EXTINT;
-use mshv_ioctls::{InterruptRequest, VmFd};
 
 // PIC port constants
 const PIC_MASTER_CMD: u16 = 0x20;
@@ -167,28 +165,16 @@ enum PitByteSelect {
 
 /// Minimal 8253/8254 PIT emulation.
 ///
-/// Parses channel 0 command and data writes to determine the timer divisor,
-/// then spawns a background thread that injects timer interrupts at the
-/// programmed rate via `request_virtual_interrupt`.
+/// Parses channel 0 command and data writes to determine the timer divisor
+/// and period. Does NOT spawn a background thread -- timer interrupt injection
+/// is performed synchronously in the vCPU run loop by checking elapsed time
+/// and writing `HV_REGISTER_PENDING_INTERRUPTION` before each vCPU entry.
+#[derive(Debug)]
 pub(crate) struct Pit {
     byte_select: PitByteSelect,
     divisor_lo: u8,
     divisor: u16,
-    timer_running: Arc<AtomicBool>,
-    timer_thread: Option<thread::JoinHandle<()>>,
-}
-
-impl fmt::Debug for Pit {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Pit")
-            .field("byte_select", &self.byte_select)
-            .field("divisor", &self.divisor)
-            .field(
-                "timer_running",
-                &self.timer_running.load(Ordering::Relaxed),
-            )
-            .finish()
-    }
+    period: Option<Duration>,
 }
 
 impl Pit {
@@ -197,8 +183,7 @@ impl Pit {
             byte_select: PitByteSelect::LoByte,
             divisor_lo: 0,
             divisor: 0,
-            timer_running: Arc::new(AtomicBool::new(false)),
-            timer_thread: None,
+            period: None,
         }
     }
 
@@ -210,8 +195,8 @@ impl Pit {
     }
 
     /// Handle a data write to port 0x40 (channel 0).
-    /// On the second byte (HiByte), computes the divisor and starts the timer.
-    pub(crate) fn handle_data(&mut self, val: u8, vm_fd: &Arc<VmFd>, vector: u32) {
+    /// On the second byte (HiByte), computes the divisor and period.
+    pub(crate) fn handle_data(&mut self, val: u8) {
         match self.byte_select {
             PitByteSelect::LoByte => {
                 self.divisor_lo = val;
@@ -220,60 +205,18 @@ impl Pit {
             PitByteSelect::HiByte => {
                 self.divisor = u16::from_le_bytes([self.divisor_lo, val]);
                 self.byte_select = PitByteSelect::LoByte;
-                self.start_timer(vm_fd, vector);
-            }
-        }
-    }
 
-    fn start_timer(&mut self, vm_fd: &Arc<VmFd>, vector: u32) {
-        self.stop_timer();
-
-        let divisor = self.divisor as u64;
-        if divisor == 0 {
-            return;
-        }
-
-        let period_ns = divisor * 1_000_000_000 / PIT_BASE_FREQ;
-        let period = Duration::from_nanos(period_ns);
-
-        self.timer_running.store(true, Ordering::Release);
-        let running = self.timer_running.clone();
-        let vm = vm_fd.clone();
-
-        self.timer_thread = Some(thread::spawn(move || {
-            while running.load(Ordering::Acquire) {
-                thread::sleep(period);
-
-                if !running.load(Ordering::Acquire) {
-                    break;
-                }
-
-                let request = InterruptRequest {
-                    interrupt_type: hv_interrupt_type_HV_X64_INTERRUPT_TYPE_EXTINT,
-                    apic_id: 0,
-                    vector,
-                    level_triggered: false,
-                    logical_destination_mode: false,
-                    long_mode: false,
-                };
-
-                if let Err(e) = vm.request_virtual_interrupt(&request) {
-                    log::warn!("Failed to inject timer interrupt: {}", e);
+                let divisor = self.divisor as u64;
+                if divisor > 0 {
+                    let period_ns = divisor * 1_000_000_000 / PIT_BASE_FREQ;
+                    self.period = Some(Duration::from_nanos(period_ns));
                 }
             }
-        }));
-    }
-
-    fn stop_timer(&mut self) {
-        self.timer_running.store(false, Ordering::Release);
-        if let Some(thread) = self.timer_thread.take() {
-            let _ = thread.join();
         }
     }
-}
 
-impl Drop for Pit {
-    fn drop(&mut self) {
-        self.stop_timer();
+    /// Returns the programmed timer period, or None if the PIT has not been configured.
+    pub(crate) fn period(&self) -> Option<Duration> {
+        self.period
     }
 }
