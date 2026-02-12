@@ -28,13 +28,19 @@ use mshv_bindings::{
     hv_partition_synthetic_processor_features, hv_register_assoc,
     hv_register_name_HV_X64_REGISTER_RIP, hv_register_value, mshv_user_mem_region,
 };
+#[cfg(feature = "hw-interrupts")]
+use mshv_bindings::hv_register_name_HV_X64_REGISTER_RAX;
 use mshv_ioctls::{Mshv, VcpuFd, VmFd};
+#[cfg(feature = "hw-interrupts")]
+use std::sync::Arc;
 use tracing::{Span, instrument};
 
 #[cfg(gdb)]
 use crate::hypervisor::gdb::DebuggableVm;
 use crate::hypervisor::regs::{CommonFpu, CommonRegisters, CommonSpecialRegisters};
 use crate::hypervisor::virtual_machine::{VirtualMachine, VmExit};
+#[cfg(feature = "hw-interrupts")]
+use crate::hypervisor::pic_pit::{Pic, Pit};
 use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
 use crate::{Result, new_error};
 
@@ -54,8 +60,15 @@ pub(crate) fn is_hypervisor_present() -> bool {
 /// A MSHV implementation of a single-vcpu VM
 #[derive(Debug)]
 pub(crate) struct MshvVm {
+    #[cfg(feature = "hw-interrupts")]
+    vm_fd: Arc<VmFd>,
+    #[cfg(not(feature = "hw-interrupts"))]
     vm_fd: VmFd,
     vcpu_fd: VcpuFd,
+    #[cfg(feature = "hw-interrupts")]
+    pic: Pic,
+    #[cfg(feature = "hw-interrupts")]
+    pit: Pit,
 }
 
 static MSHV: LazyLock<Result<Mshv>> =
@@ -86,7 +99,17 @@ impl MshvVm {
 
         let vcpu_fd = vm_fd.create_vcpu(0)?;
 
-        Ok(Self { vm_fd, vcpu_fd })
+        #[cfg(feature = "hw-interrupts")]
+        let vm_fd = Arc::new(vm_fd);
+
+        Ok(Self {
+            vm_fd,
+            vcpu_fd,
+            #[cfg(feature = "hw-interrupts")]
+            pic: Pic::new(),
+            #[cfg(feature = "hw-interrupts")]
+            pit: Pit::new(),
+        })
     }
 }
 
@@ -112,68 +135,134 @@ impl VirtualMachine for MshvVm {
         #[cfg(gdb)]
         const EXCEPTION_INTERCEPT: hv_message_type = hv_message_type_HVMSG_X64_EXCEPTION_INTERCEPT;
 
-        let exit_reason = self.vcpu_fd.run();
+        loop {
+            let exit_reason = self.vcpu_fd.run();
 
-        let result = match exit_reason {
-            Ok(m) => match m.header.message_type {
-                HALT_MESSAGE => VmExit::Halt(),
-                IO_PORT_INTERCEPT_MESSAGE => {
-                    let io_message = m.to_ioport_info().map_err(mshv_ioctls::MshvError::from)?;
-                    let port_number = io_message.port_number;
-                    let rip = io_message.header.rip;
-                    let rax = io_message.rax;
-                    let instruction_length = io_message.header.instruction_length() as u64;
+            match exit_reason {
+                Ok(m) => match m.header.message_type {
+                    HALT_MESSAGE => return Ok(VmExit::Halt()),
+                    IO_PORT_INTERCEPT_MESSAGE => {
+                        let io_message =
+                            m.to_ioport_info().map_err(mshv_ioctls::MshvError::from)?;
+                        let port = io_message.port_number;
+                        let rip = io_message.header.rip;
+                        let rax = io_message.rax;
+                        let instruction_length =
+                            io_message.header.instruction_length() as u64;
 
-                    // mshv, unlike kvm, does not automatically increment RIP
-                    self.vcpu_fd.set_reg(&[hv_register_assoc {
-                        name: hv_register_name_HV_X64_REGISTER_RIP,
-                        value: hv_register_value {
-                            reg64: rip + instruction_length,
-                        },
-                        ..Default::default()
-                    }])?;
-                    VmExit::IoOut(port_number, rax.to_le_bytes().to_vec())
-                }
-                UNMAPPED_GPA_MESSAGE => {
-                    let mimo_message = m.to_memory_info().map_err(mshv_ioctls::MshvError::from)?;
-                    let addr = mimo_message.guest_physical_address;
-                    match MemoryRegionFlags::try_from(mimo_message)? {
-                        MemoryRegionFlags::READ => VmExit::MmioRead(addr),
-                        MemoryRegionFlags::WRITE => VmExit::MmioWrite(addr),
-                        _ => VmExit::Unknown("Unknown MMIO access".to_string()),
+                        // Extract access_size from the access_info bitfield (lower 3 bits)
+                        let access_size =
+                            (unsafe { io_message.access_info.as_uint8 } & 0x07) as usize;
+
+                        // Distinguish IO IN (read, type=0) from IO OUT (write, type=1)
+                        let is_io_in = io_message.header.intercept_access_type == 0;
+
+                        // mshv, unlike kvm, does not automatically increment RIP
+                        self.vcpu_fd.set_reg(&[hv_register_assoc {
+                            name: hv_register_name_HV_X64_REGISTER_RIP,
+                            value: hv_register_value {
+                                reg64: rip + instruction_length,
+                            },
+                            ..Default::default()
+                        }])?;
+
+                        if is_io_in {
+                            // === IO IN ===
+                            #[cfg(feature = "hw-interrupts")]
+                            if let Some(val) = self.pic.handle_io_in(port) {
+                                // Set RAX with response value, preserving upper bits
+                                let mask = match access_size {
+                                    1 => 0xFFu64,
+                                    2 => 0xFFFFu64,
+                                    4 => 0xFFFF_FFFFu64,
+                                    _ => u64::MAX,
+                                };
+                                let new_rax = (rax & !mask) | (val as u64 & mask);
+                                self.vcpu_fd.set_reg(&[hv_register_assoc {
+                                    name: hv_register_name_HV_X64_REGISTER_RAX,
+                                    value: hv_register_value { reg64: new_rax },
+                                    ..Default::default()
+                                }])?;
+                                continue; // re-enter vCPU
+                            }
+                            return Ok(VmExit::IoIn(port, access_size as u8));
+                        } else {
+                            // === IO OUT ===
+                            // Mask rax by access_size
+                            let mask = match access_size {
+                                1 => 0xFFu64,
+                                2 => 0xFFFFu64,
+                                4 => 0xFFFF_FFFFu64,
+                                _ => u64::MAX,
+                            };
+                            let data_val = rax & mask;
+
+                            #[cfg(feature = "hw-interrupts")]
+                            if self.handle_hw_io_out(port, data_val as u8) {
+                                continue; // re-enter vCPU
+                            }
+
+                            return Ok(VmExit::IoOut(
+                                port,
+                                data_val.to_le_bytes()[..access_size.max(1)].to_vec(),
+                            ));
+                        }
                     }
-                }
-                INVALID_GPA_ACCESS_MESSAGE => {
-                    let mimo_message = m.to_memory_info().map_err(mshv_ioctls::MshvError::from)?;
-                    let gpa = mimo_message.guest_physical_address;
-                    let access_info = MemoryRegionFlags::try_from(mimo_message)?;
-                    match access_info {
-                        MemoryRegionFlags::READ => VmExit::MmioRead(gpa),
-                        MemoryRegionFlags::WRITE => VmExit::MmioWrite(gpa),
-                        _ => VmExit::Unknown("Unknown MMIO access".to_string()),
+                    UNMAPPED_GPA_MESSAGE => {
+                        let mimo_message =
+                            m.to_memory_info().map_err(mshv_ioctls::MshvError::from)?;
+                        let addr = mimo_message.guest_physical_address;
+                        return match MemoryRegionFlags::try_from(mimo_message)? {
+                            MemoryRegionFlags::READ => Ok(VmExit::MmioRead(addr)),
+                            MemoryRegionFlags::WRITE => Ok(VmExit::MmioWrite(addr)),
+                            _ => Ok(VmExit::Unknown(
+                                "Unknown MMIO access".to_string(),
+                            )),
+                        };
                     }
-                }
-                #[cfg(gdb)]
-                EXCEPTION_INTERCEPT => {
-                    let ex_info = m
-                        .to_exception_info()
-                        .map_err(mshv_ioctls::MshvError::from)?;
-                    let DebugRegisters { dr6, .. } = self.vcpu_fd.get_debug_regs()?;
-                    VmExit::Debug {
-                        dr6,
-                        exception: ex_info.exception_vector as u32,
+                    INVALID_GPA_ACCESS_MESSAGE => {
+                        let mimo_message =
+                            m.to_memory_info().map_err(mshv_ioctls::MshvError::from)?;
+                        let gpa = mimo_message.guest_physical_address;
+                        let access_info = MemoryRegionFlags::try_from(mimo_message)?;
+                        return match access_info {
+                            MemoryRegionFlags::READ => Ok(VmExit::MmioRead(gpa)),
+                            MemoryRegionFlags::WRITE => Ok(VmExit::MmioWrite(gpa)),
+                            _ => Ok(VmExit::Unknown(
+                                "Unknown MMIO access".to_string(),
+                            )),
+                        };
                     }
-                }
-                other => VmExit::Unknown(format!("Unknown MSHV VCPU exit: {:?}", other)),
-            },
-            Err(e) => match e.errno() {
-                // InterruptHandle::kill() sends a signal (SIGRTMIN+offset) to interrupt the vcpu, which causes EINTR
-                libc::EINTR => VmExit::Cancelled(),
-                libc::EAGAIN => VmExit::Retry(),
-                _ => VmExit::Unknown(format!("Unknown MSHV VCPU error: {}", e)),
-            },
-        };
-        Ok(result)
+                    #[cfg(gdb)]
+                    EXCEPTION_INTERCEPT => {
+                        let ex_info = m
+                            .to_exception_info()
+                            .map_err(mshv_ioctls::MshvError::from)?;
+                        let DebugRegisters { dr6, .. } = self.vcpu_fd.get_debug_regs()?;
+                        return Ok(VmExit::Debug {
+                            dr6,
+                            exception: ex_info.exception_vector as u32,
+                        });
+                    }
+                    other => {
+                        return Ok(VmExit::Unknown(format!(
+                            "Unknown MSHV VCPU exit: {:?}",
+                            other
+                        )))
+                    }
+                },
+                Err(e) => match e.errno() {
+                    // InterruptHandle::kill() sends a signal (SIGRTMIN+offset) to interrupt the vcpu, which causes EINTR
+                    libc::EINTR => return Ok(VmExit::Cancelled()),
+                    libc::EAGAIN => continue,
+                    _ => {
+                        return Ok(VmExit::Unknown(format!(
+                            "Unknown MSHV VCPU error: {}",
+                            e
+                        )))
+                    }
+                },
+            }
     }
 
     fn regs(&self) -> Result<CommonRegisters> {
@@ -213,6 +302,44 @@ impl VirtualMachine for MshvVm {
     fn xsave(&self) -> Result<Vec<u8>> {
         let xsave = self.vcpu_fd.get_xsave()?;
         Ok(xsave.buffer.to_vec())
+    }
+}
+
+#[cfg(feature = "hw-interrupts")]
+impl MshvVm {
+    /// Handle an IO OUT to a hardware emulation port (PIC, PIT, speaker, IO wait).
+    /// Returns true if the port was handled internally.
+    fn handle_hw_io_out(&mut self, port: u16, val: u8) -> bool {
+        // PIC ports
+        if self.pic.handle_io_out(port, val) {
+            return true;
+        }
+
+        // PIT command register
+        if port == 0x43 {
+            self.pit.handle_command(val);
+            return true;
+        }
+
+        // PIT channel 0 data
+        if port == 0x40 {
+            let vector = self.pic.master_vector_base() as u32;
+            self.pit.handle_data(val, &self.vm_fd, vector);
+            return true;
+        }
+
+        // Speaker port (0x61) -- silently ignore
+        // Equivalent to KVM's KVM_PIT_SPEAKER_DUMMY
+        if port == 0x61 {
+            return true;
+        }
+
+        // IO wait port (0x80) -- silently ignore (timing delay)
+        if port == 0x80 {
+            return true;
+        }
+
+        false
     }
 }
 

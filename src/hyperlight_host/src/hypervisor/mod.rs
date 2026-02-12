@@ -16,6 +16,10 @@ limitations under the License.
 
 use log::LevelFilter;
 
+/// Userspace PIC/PIT emulation.
+#[cfg(feature = "hw-interrupts")]
+pub(crate) mod pic_pit;
+
 /// GDB debugging support
 #[cfg(gdb)]
 pub(crate) mod gdb;
