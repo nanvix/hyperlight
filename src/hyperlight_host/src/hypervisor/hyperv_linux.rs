@@ -17,6 +17,8 @@ limitations under the License.
 #[cfg(gdb)]
 use std::fmt::Debug;
 use std::sync::LazyLock;
+#[cfg(feature = "hw-interrupts")]
+use std::time::Instant;
 
 #[cfg(gdb)]
 use mshv_bindings::{DebugRegisters, hv_message_type_HVMSG_X64_EXCEPTION_INTERCEPT};
@@ -29,10 +31,10 @@ use mshv_bindings::{
     hv_register_name_HV_X64_REGISTER_RIP, hv_register_value, mshv_user_mem_region,
 };
 #[cfg(feature = "hw-interrupts")]
-use mshv_bindings::hv_register_name_HV_X64_REGISTER_RAX;
+use mshv_bindings::{
+    hv_register_name_HV_REGISTER_PENDING_INTERRUPTION, hv_register_name_HV_X64_REGISTER_RAX,
+};
 use mshv_ioctls::{Mshv, VcpuFd, VmFd};
-#[cfg(feature = "hw-interrupts")]
-use std::sync::Arc;
 use tracing::{Span, instrument};
 
 #[cfg(gdb)]
@@ -59,15 +61,14 @@ pub(crate) fn is_hypervisor_present() -> bool {
 /// A MSHV implementation of a single-vcpu VM
 #[derive(Debug)]
 pub(crate) struct MshvVm {
-    #[cfg(feature = "hw-interrupts")]
-    vm_fd: Arc<VmFd>,
-    #[cfg(not(feature = "hw-interrupts"))]
     vm_fd: VmFd,
     vcpu_fd: VcpuFd,
     #[cfg(feature = "hw-interrupts")]
     pic: Pic,
     #[cfg(feature = "hw-interrupts")]
     pit: Pit,
+    #[cfg(feature = "hw-interrupts")]
+    last_tick: Instant,
 }
 
 static MSHV: LazyLock<Result<Mshv>> =
@@ -98,9 +99,6 @@ impl MshvVm {
 
         let vcpu_fd = vm_fd.create_vcpu(0)?;
 
-        #[cfg(feature = "hw-interrupts")]
-        let vm_fd = Arc::new(vm_fd);
-
         Ok(Self {
             vm_fd,
             vcpu_fd,
@@ -108,6 +106,8 @@ impl MshvVm {
             pic: Pic::new(),
             #[cfg(feature = "hw-interrupts")]
             pit: Pit::new(),
+            #[cfg(feature = "hw-interrupts")]
+            last_tick: Instant::now(),
         })
     }
 }
@@ -135,11 +135,51 @@ impl Hypervisor for MshvVm {
         const EXCEPTION_INTERCEPT: hv_message_type = hv_message_type_HVMSG_X64_EXCEPTION_INTERCEPT;
 
         loop {
+            // --- Timer injection (hw-interrupts only) ---
+            // Before each vCPU entry, check if a timer tick is due and inject
+            // an interrupt via HV_REGISTER_PENDING_INTERRUPTION.
+            #[cfg(feature = "hw-interrupts")]
+            if let Some(period) = self.pit.period() {
+                let elapsed = self.last_tick.elapsed();
+                if elapsed >= period {
+                    self.last_tick = Instant::now();
+                    let vector = self.pic.master_vector_base() as u64;
+                    // Format: bit 31 = valid, bits 10:8 = type (0 = external), bits 7:0 = vector
+                    let pending = vector | (1u64 << 31);
+                    self.vcpu_fd.set_reg(&[hv_register_assoc {
+                        name: hv_register_name_HV_REGISTER_PENDING_INTERRUPTION,
+                        value: hv_register_value { reg64: pending },
+                        ..Default::default()
+                    }])?;
+                }
+            }
+
             let exit_reason = self.vcpu_fd.run();
 
             match exit_reason {
                 Ok(m) => match m.header.message_type {
-                    HALT_MESSAGE => return Ok(HyperlightExit::Halt()),
+                    HALT_MESSAGE => {
+                        // When hw-interrupts are enabled and the PIT is configured,
+                        // HLT means "wait for the next interrupt". Sleep until the
+                        // next timer tick, inject the interrupt, and re-enter.
+                        #[cfg(feature = "hw-interrupts")]
+                        if let Some(period) = self.pit.period() {
+                            let elapsed = self.last_tick.elapsed();
+                            if elapsed < period {
+                                std::thread::sleep(period - elapsed);
+                            }
+                            self.last_tick = Instant::now();
+                            let vector = self.pic.master_vector_base() as u64;
+                            let pending = vector | (1u64 << 31);
+                            self.vcpu_fd.set_reg(&[hv_register_assoc {
+                                name: hv_register_name_HV_REGISTER_PENDING_INTERRUPTION,
+                                value: hv_register_value { reg64: pending },
+                                ..Default::default()
+                            }])?;
+                            continue; // re-enter vCPU
+                        }
+                        return Ok(HyperlightExit::Halt());
+                    }
                     IO_PORT_INTERCEPT_MESSAGE => {
                         let io_message =
                             m.to_ioport_info().map_err(mshv_ioctls::MshvError::from)?;
@@ -323,8 +363,7 @@ impl MshvVm {
 
         // PIT channel 0 data
         if port == 0x40 {
-            let vector = self.pic.master_vector_base() as u32;
-            self.pit.handle_data(val, &self.vm_fd, vector);
+            self.pit.handle_data(val);
             return true;
         }
 
