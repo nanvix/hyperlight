@@ -26,8 +26,8 @@ pub(crate) mod hyperv_linux;
 #[cfg(target_os = "windows")]
 pub(crate) mod hyperv_windows;
 
-/// Userspace PIC/PIT emulation for MSHV
-#[cfg(all(mshv3, feature = "hw-interrupts"))]
+/// Userspace PIC/PIT emulation for MSHV and WHP
+#[cfg(feature = "hw-interrupts")]
 pub(crate) mod pic_pit;
 
 /// GDB debugging support
