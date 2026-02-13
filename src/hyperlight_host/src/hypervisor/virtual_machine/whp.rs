@@ -224,20 +224,40 @@ impl VirtualMachine for WhpVm {
     fn run_vcpu(&mut self) -> Result<VmExit> {
         loop {
             // --- Timer injection (hw-interrupts only) ---
-            // Before each vCPU entry, check if a timer tick is due and inject
-            // an interrupt via WHvRegisterPendingInterruption.
+            // Before each vCPU entry, check if a timer tick is due and the guest
+            // can accept interrupts (IF=1), then inject via WHvRegisterPendingInterruption.
             #[cfg(feature = "hw-interrupts")]
             if let Some(period) = self.pit.period() {
                 let elapsed = self.last_tick.elapsed();
                 if elapsed >= period {
-                    self.last_tick = Instant::now();
-                    let vector = self.pic.master_vector_base() as u64;
-                    // Format: bit 31 = valid, bits 10:8 = type (0 = external), bits 7:0 = vector
-                    let pending = vector | (1u64 << 31);
-                    self.set_registers(&[(
-                        WHvRegisterPendingInterruption,
-                        Align16(WHV_REGISTER_VALUE { Reg64: pending }),
-                    )])?;
+                    // Read RFLAGS to check if interrupts are enabled (IF = bit 9).
+                    let rflags = {
+                        let names = [WHvX64RegisterRflags];
+                        let mut values: [Align16<WHV_REGISTER_VALUE>; 1] =
+                            unsafe { std::mem::zeroed() };
+                        unsafe {
+                            WHvGetVirtualProcessorRegisters(
+                                self.partition,
+                                0,
+                                names.as_ptr(),
+                                1,
+                                values.as_mut_ptr() as *mut WHV_REGISTER_VALUE,
+                            )?;
+                            values[0].0.Reg64
+                        }
+                    };
+                    let interrupts_enabled = rflags & (1 << 9) != 0;
+
+                    if interrupts_enabled {
+                        self.last_tick = Instant::now();
+                        let vector = self.pic.master_vector_base() as u64;
+                        // Format: bit 31 = valid, bits 10:8 = type (0 = external), bits 7:0 = vector
+                        let pending = vector | (1u64 << 31);
+                        self.set_registers(&[(
+                            WHvRegisterPendingInterruption,
+                            Align16(WHV_REGISTER_VALUE { Reg64: pending }),
+                        )])?;
+                    }
                 }
             }
 
