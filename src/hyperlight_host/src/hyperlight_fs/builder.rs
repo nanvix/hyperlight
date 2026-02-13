@@ -1093,16 +1093,32 @@ impl HyperlightFSBuilder<NoFat> {
         })
     }
 
-    /// Windows stub.
+    /// Windows version of add_fat_image — opens pre-built FAT files only.
     #[cfg(windows)]
     pub fn add_fat_image<P: AsRef<Path>>(
         self,
-        _host_path: P,
-        _mount_point: &str,
+        host_path: P,
+        mount_point: &str,
     ) -> Result<HyperlightFSBuilder<WithFat>> {
-        Err(HyperlightError::Error(
-            FAT_NOT_SUPPORTED_ON_WINDOWS.to_string(),
-        ))
+        let host_path = host_path.as_ref();
+        let mount_point = self.validate_mount_point(mount_point)?;
+        self.check_mount_conflicts(&mount_point)?;
+
+        let image = FatImage::open(host_path)?;
+
+        info!(
+            host = %host_path.display(),
+            mount_point = %mount_point,
+            size = image.size(),
+            "Adding FAT image to HyperlightFS"
+        );
+
+        Ok(HyperlightFSBuilder {
+            files: self.files,
+            guest_paths_seen: self.guest_paths_seen,
+            fat_mounts: vec![FatMountEntry { image, mount_point }],
+            _marker: PhantomData,
+        })
     }
 
     /// Create an empty FAT filesystem at a mount point.
@@ -1288,12 +1304,24 @@ impl HyperlightFSBuilder<WithFat> {
         Ok(self)
     }
 
-    /// Windows stub.
+    /// Windows version of add_fat_image for WithFat builders.
     #[cfg(windows)]
-    pub fn add_fat_image<P: AsRef<Path>>(self, _host_path: P, _mount_point: &str) -> Result<Self> {
-        Err(HyperlightError::Error(
-            FAT_NOT_SUPPORTED_ON_WINDOWS.to_string(),
-        ))
+    pub fn add_fat_image<P: AsRef<Path>>(mut self, host_path: P, mount_point: &str) -> Result<Self> {
+        let host_path = host_path.as_ref();
+        let mount_point = self.validate_mount_point(mount_point)?;
+        self.check_mount_conflicts(&mount_point)?;
+
+        let image = FatImage::open(host_path)?;
+
+        info!(
+            host = %host_path.display(),
+            mount_point = %mount_point,
+            size = image.size(),
+            "Adding FAT image to HyperlightFS"
+        );
+
+        self.fat_mounts.push(FatMountEntry { image, mount_point });
+        Ok(self)
     }
 
     /// Create an empty FAT filesystem at a mount point.

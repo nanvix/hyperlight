@@ -1576,127 +1576,350 @@ impl Drop for FatImage {
     }
 }
 
-/// Windows stub - FatImage is not yet implemented on Windows.
+/// Windows implementation of FatImage using memory-mapped files.
 ///
-/// All constructors return an error. Other methods exist only to satisfy
-/// the API but cannot be called since no `FatImage` can be constructed.
+/// Uses CreateFileMappingW / MapViewOfFile for memory mapping and fs2 for
+/// file locking (same as Unix).
 #[cfg(windows)]
 pub struct FatImage {
-    _private: (),
+    /// The backing file (holds the exclusive lock via fs2).
+    _file: File,
+    /// Memory-mapped view pointer.
+    mmap_ptr: *mut u8,
+    /// Size of the mapped region.
+    mmap_size: usize,
+    /// Path to the backing file.
+    path: PathBuf,
+    /// Whether this is a temp file (delete on drop).
+    is_temp: bool,
+    /// Windows file mapping handle (must be closed after unmapping).
+    mapping_handle: windows::Win32::Foundation::HANDLE,
+    /// Cached FAT filesystem handle.
+    ///
+    /// # Safety
+    ///
+    /// The `'static` lifetime is a lie — see Unix FatImage docs.
+    /// This field **must** be set to `None` before unmapping in `Drop::drop()`.
+    fs: Option<FatFs>,
 }
 
 #[cfg(windows)]
+impl std::fmt::Debug for FatImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FatImage")
+            .field("mmap_ptr", &self.mmap_ptr)
+            .field("mmap_size", &self.mmap_size)
+            .field("path", &self.path)
+            .field("is_temp", &self.is_temp)
+            .field("fs", &self.fs.as_ref().map(|_| "<FileSystem>"))
+            .finish()
+    }
+}
+
+// SAFETY: Same reasoning as Unix — mmap'd region is process-local,
+// file lock ensures exclusive access.
+#[cfg(windows)]
+unsafe impl Send for FatImage {}
+
+#[cfg(windows)]
 impl FatImage {
-    /// Returns an error - FatImage is not supported on Windows.
-    pub fn open<P: AsRef<Path>>(_path: P) -> Result<Self> {
-        Err(HyperlightError::Error(
-            "FatImage is not supported on Windows".to_string(),
-        ))
+    /// Open an existing FAT image from a file with exclusive lock.
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::System::Memory::*;
+
+        let path = path.as_ref().to_path_buf();
+
+        info!(path = %path.display(), "Opening FAT image");
+
+        // Open file for read/write
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|e| {
+                error!(path = %path.display(), error = %e, "Failed to open FAT image");
+                HyperlightError::Error(format!("Failed to open FAT image {:?}: {}", path, e))
+            })?;
+
+        // Try to acquire exclusive lock (non-blocking) via fs2
+        file.try_lock_exclusive().map_err(|e| {
+            error!(path = %path.display(), error = %e, "FAT image is locked by another process");
+            HyperlightError::Error(format!(
+                "File is locked by another process {:?}: {}",
+                path, e
+            ))
+        })?;
+
+        // Get file size
+        let metadata = file.metadata().map_err(|e| {
+            error!(path = %path.display(), error = %e, "Failed to get FAT image metadata");
+            HyperlightError::Error(format!("Failed to get metadata for {:?}: {}", path, e))
+        })?;
+        let size = metadata.len() as usize;
+
+        Self::validate_size(size)?;
+
+        // Create a file mapping object
+        let file_handle = HANDLE(file.as_raw_handle());
+        let mapping_handle = unsafe {
+            CreateFileMappingW(
+                file_handle,
+                None,
+                PAGE_READWRITE,
+                0,
+                0,
+                None,
+            )
+        }
+        .map_err(|e| {
+            error!(error = %e, "Failed to create file mapping");
+            HyperlightError::Error(format!("CreateFileMappingW failed: {}", e))
+        })?;
+
+        // Map the entire file into memory
+        let ptr = unsafe {
+            MapViewOfFile(
+                mapping_handle,
+                FILE_MAP_READ | FILE_MAP_WRITE,
+                0,
+                0,
+                size,
+            )
+        };
+
+        if ptr.Value.is_null() {
+            let err = std::io::Error::last_os_error();
+            unsafe {
+                windows::Win32::Foundation::CloseHandle(mapping_handle).ok();
+            }
+            error!(size, error = %err, "Failed to map FAT image into memory");
+            return Err(HyperlightError::Error(format!(
+                "MapViewOfFile failed: {}",
+                err
+            )));
+        }
+
+        let mmap_ptr = ptr.Value as *mut u8;
+
+        // Validate it's actually a FAT filesystem
+        if let Err(e) = Self::validate_fat_image(mmap_ptr, size) {
+            unsafe {
+                UnmapViewOfFile(ptr).ok();
+                windows::Win32::Foundation::CloseHandle(mapping_handle).ok();
+            }
+            return Err(e);
+        }
+
+        info!(path = %path.display(), size, "FAT image opened and locked");
+
+        Ok(Self {
+            _file: file,
+            mmap_ptr,
+            mmap_size: size,
+            path,
+            is_temp: false,
+            mapping_handle,
+            fs: None,
+        })
     }
 
-    /// Returns an error - FatImage is not supported on Windows.
+    /// Returns an error - creating FAT images is not supported on Windows.
     pub fn create_at<P: AsRef<Path>>(_path: P, _size_bytes: usize) -> Result<Self> {
         Err(HyperlightError::Error(
-            "FatImage is not supported on Windows".to_string(),
+            "Creating FAT images is not supported on Windows".to_string(),
         ))
     }
 
-    /// Returns an error - FatImage is not supported on Windows.
+    /// Returns an error - creating FAT images is not supported on Windows.
     pub fn create_temp(_size_bytes: usize) -> Result<Self> {
         Err(HyperlightError::Error(
-            "FatImage is not supported on Windows".to_string(),
+            "Creating FAT images is not supported on Windows".to_string(),
         ))
     }
 
-    // The following methods cannot be called because FatImage cannot be constructed.
-    // They exist only to provide API compatibility.
-
-    #[doc(hidden)]
+    /// Get pointer to the memory-mapped FAT image.
     pub fn as_ptr(&self) -> *const u8 {
-        std::ptr::null()
+        self.mmap_ptr as *const u8
     }
 
-    #[doc(hidden)]
+    /// Get mutable pointer to the memory-mapped FAT image.
     pub fn as_mut_ptr(&mut self) -> *mut u8 {
-        std::ptr::null_mut()
+        self.mmap_ptr
     }
 
-    #[doc(hidden)]
+    /// Get the size of the FAT image.
     pub fn size(&self) -> usize {
-        0
+        self.mmap_size
     }
 
-    #[doc(hidden)]
+    /// Get the path to the backing file.
     pub fn path(&self) -> &Path {
-        Path::new("")
+        &self.path
     }
 
-    #[doc(hidden)]
+    /// Whether this is a temporary file.
     pub fn is_temp(&self) -> bool {
-        false
+        self.is_temp
     }
+
+    /// Validate the FAT image size.
+    fn validate_size(size_bytes: usize) -> Result<()> {
+        if !(MIN_FAT_IMAGE_SIZE..=MAX_FAT_IMAGE_SIZE).contains(&size_bytes) {
+            error!(
+                size = size_bytes,
+                min = MIN_FAT_IMAGE_SIZE,
+                max = MAX_FAT_IMAGE_SIZE,
+                "FAT image size out of range"
+            );
+            return Err(HyperlightError::Error(format!(
+                "FAT image size {} is out of range ({} - {})",
+                size_bytes, MIN_FAT_IMAGE_SIZE, MAX_FAT_IMAGE_SIZE
+            )));
+        }
+        Ok(())
+    }
+
+    /// Validate that the mmap'd region contains a valid FAT filesystem.
+    fn validate_fat_image(ptr: *mut u8, size: usize) -> Result<()> {
+        let slice = unsafe { std::slice::from_raw_parts_mut(ptr, size) };
+        let cursor = std::io::Cursor::new(slice);
+        let io = fatfs::StdIoWrapper::new(cursor);
+
+        fatfs::FileSystem::new(io, fatfs::FsOptions::new()).map_err(|e| {
+            error!(error = %e, "File is not a valid FAT image");
+            HyperlightError::Error(format!("Not a valid FAT image: {}", e))
+        })?;
+
+        Ok(())
+    }
+
+    /// Flush memory-mapped changes to disk.
+    pub(crate) fn msync(&self) -> Result<()> {
+        use windows::Win32::System::Memory::FlushViewOfFile;
+
+        unsafe {
+            FlushViewOfFile(self.mmap_ptr as *const std::ffi::c_void, self.mmap_size).map_err(
+                |e| {
+                    error!(error = %e, "Failed to flush FAT image to disk");
+                    HyperlightError::Error(format!("FlushViewOfFile failed: {}", e))
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Get or create the cached FAT filesystem handle.
+    fn get_fs(&mut self) -> Result<&mut FatFs> {
+        if self.fs.is_none() {
+            let slice = unsafe { std::slice::from_raw_parts_mut(self.mmap_ptr, self.mmap_size) };
+            let cursor = std::io::Cursor::new(slice);
+            let io = fatfs::StdIoWrapper::new(cursor);
+            let fs = fatfs::FileSystem::new(io, fatfs::FsOptions::new()).map_err(|e| {
+                HyperlightError::Error(format!("Failed to open FAT filesystem: {}", e))
+            })?;
+            self.fs = Some(fs);
+        }
+        Ok(self.fs.as_mut().unwrap())
+    }
+
+    // Stub file I/O methods — not needed for mounting pre-built FATs,
+    // but exist for API compatibility.
 
     #[doc(hidden)]
     pub fn read_dir(&mut self, _path: &str) -> Result<Vec<FatEntry>> {
         Err(HyperlightError::Error(
-            "FatImage is not supported on Windows".to_string(),
+            "FAT file I/O is not supported on Windows".to_string(),
         ))
     }
 
     #[doc(hidden)]
     pub fn open_file(&mut self, _path: &str) -> Result<FatFileReader<'_>> {
         Err(HyperlightError::Error(
-            "FatImage is not supported on Windows".to_string(),
+            "FAT file I/O is not supported on Windows".to_string(),
         ))
     }
 
     #[doc(hidden)]
     pub fn create_file(&mut self, _path: &str) -> Result<FatFileWriter<'_>> {
         Err(HyperlightError::Error(
-            "FatImage is not supported on Windows".to_string(),
+            "FAT file I/O is not supported on Windows".to_string(),
         ))
     }
 
     #[doc(hidden)]
     pub fn create_dir(&mut self, _path: &str) -> Result<()> {
         Err(HyperlightError::Error(
-            "FatImage is not supported on Windows".to_string(),
+            "FAT file I/O is not supported on Windows".to_string(),
         ))
     }
 
     #[doc(hidden)]
     pub fn delete_file(&mut self, _path: &str) -> Result<()> {
         Err(HyperlightError::Error(
-            "FatImage is not supported on Windows".to_string(),
+            "FAT file I/O is not supported on Windows".to_string(),
         ))
     }
 
     #[doc(hidden)]
     pub fn delete_dir(&mut self, _path: &str) -> Result<()> {
         Err(HyperlightError::Error(
-            "FatImage is not supported on Windows".to_string(),
+            "FAT file I/O is not supported on Windows".to_string(),
         ))
     }
 
     #[doc(hidden)]
     pub fn rename(&mut self, _old_path: &str, _new_path: &str) -> Result<()> {
         Err(HyperlightError::Error(
-            "FatImage is not supported on Windows".to_string(),
+            "FAT file I/O is not supported on Windows".to_string(),
         ))
     }
 
     #[doc(hidden)]
     pub fn stat(&mut self, _path: &str) -> Result<FatStat> {
         Err(HyperlightError::Error(
-            "FatImage is not supported on Windows".to_string(),
+            "FAT file I/O is not supported on Windows".to_string(),
         ))
     }
 
     #[doc(hidden)]
     pub fn exists(&mut self, _path: &str) -> Result<bool> {
         Err(HyperlightError::Error(
-            "FatImage is not supported on Windows".to_string(),
+            "FAT file I/O is not supported on Windows".to_string(),
         ))
+    }
+}
+
+#[cfg(windows)]
+impl Drop for FatImage {
+    fn drop(&mut self) {
+        // CRITICAL: Drop the FileSystem BEFORE unmapping the memory it references.
+        self.fs = None;
+
+        // Unmap the view
+        let view = windows::Win32::System::Memory::MEMORY_MAPPED_VIEW_ADDRESS {
+            Value: self.mmap_ptr as *mut std::ffi::c_void,
+        };
+        if let Err(e) = unsafe { windows::Win32::System::Memory::UnmapViewOfFile(view) } {
+            error!(error = %e, "Failed to unmap FAT image view");
+        }
+
+        // Close the mapping handle
+        if let Err(e) = unsafe { windows::Win32::Foundation::CloseHandle(self.mapping_handle) } {
+            error!(error = %e, "Failed to close file mapping handle");
+        }
+
+        // File lock is released when _file is dropped
+
+        // Delete temp file if applicable
+        if self.is_temp {
+            if let Err(e) = std::fs::remove_file(&self.path) {
+                error!(path = %self.path.display(), error = %e, "Failed to delete temp FAT image");
+            } else {
+                debug!(path = %self.path.display(), "Deleted temp FAT image");
+            }
+        }
     }
 }
 

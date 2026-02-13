@@ -113,7 +113,6 @@ struct InodeEntry {
 ///
 /// This stores the FAT image itself along with mount point.
 /// The FatImage must stay alive for the sandbox lifetime.
-#[cfg(unix)]
 pub(crate) struct FatMountStorage {
     /// The FAT image (owns the mmap'd region)
     image: super::fat_image::FatImage,
@@ -121,7 +120,6 @@ pub(crate) struct FatMountStorage {
     mount_point: String,
 }
 
-#[cfg(unix)]
 impl FatMountStorage {
     /// Create a new FAT mount storage.
     pub(super) fn new(image: super::fat_image::FatImage, mount_point: String) -> Self {
@@ -160,10 +158,8 @@ pub struct HyperlightFSImage {
     /// Inode entries (files, directories, and FAT mounts)
     inode_entries: Vec<InodeEntry>,
     /// Memory-mapped files with metadata (read-only)
-    #[cfg(unix)]
     file_mappings: Vec<FileMapping>,
     /// FAT mount storage info (actual FatImages handled separately)
-    #[cfg(unix)]
     fat_mounts: Vec<FatMountStorage>,
     /// Total size of the read-only mapped files region (page-aligned)
     ro_files_region_size: usize,
@@ -265,13 +261,11 @@ impl HyperlightFSImage {
     }
 
     /// Get the file mappings for wiring into guest memory.
-    #[cfg(unix)]
     pub(crate) fn file_mappings(&self) -> &[FileMapping] {
         &self.file_mappings
     }
 
     /// Get the FAT mounts for wiring into guest memory.
-    #[cfg(unix)]
     pub(crate) fn fat_mounts(&self) -> &[FatMountStorage] {
         &self.fat_mounts
     }
@@ -280,7 +274,6 @@ impl HyperlightFSImage {
     ///
     /// This is used by the sandbox extraction APIs to read/write files
     /// in FAT mounts while the VM is paused.
-    #[cfg(unix)]
     pub(crate) fn fat_mounts_mut(&mut self) -> &mut [FatMountStorage] {
         &mut self.fat_mounts
     }
@@ -297,7 +290,6 @@ impl HyperlightFSImage {
     ///
     /// A mutable reference to the `FatImage` if found, or `None` if no mount
     /// exists at the given path.
-    #[cfg(unix)]
     pub fn fat_mount_mut(&mut self, mount_point: &str) -> Option<&mut super::fat_image::FatImage> {
         for mount in &mut self.fat_mounts {
             if mount.mount_point() == mount_point {
@@ -325,7 +317,6 @@ impl HyperlightFSImage {
     /// - Temporary FAT images (created with `add_empty_fat_mount`) are skipped
     ///   since they will be deleted on drop
     /// - The kernel tracks dirty pages automatically; syncing clean pages is fast
-    #[cfg(unix)]
     pub(crate) fn msync_fat_mounts(&self) -> crate::Result<()> {
         if self.fat_mounts.is_empty() {
             return Ok(());
@@ -381,7 +372,6 @@ impl HyperlightFSImage {
     /// let result = image.find_fat_mount("/other/path");
     /// // Returns None
     /// ```
-    #[cfg(unix)]
     pub(crate) fn find_fat_mount(&self, guest_path: &str) -> Option<(usize, String)> {
         // Normalize the path: ensure it starts with "/" and doesn't have trailing "/"
         let normalized_path = if guest_path.starts_with('/') {
@@ -423,15 +413,13 @@ impl HyperlightFSImage {
 
         // Map inodes to manifest entries, using host_path from file_mappings
         // where available (for files)
-        #[cfg(unix)]
         let mut file_mapping_idx = 0;
 
         for entry in &self.inode_entries {
             let is_dir = entry.entry_type == InodeEntryType::Directory;
             let is_fat = entry.entry_type == InodeEntryType::FatMount;
 
-            // Get host path from file_mappings for regular files (unix only)
-            #[cfg(unix)]
+            // Get host path from file_mappings for regular files
             let host_path = if entry.entry_type == InodeEntryType::File
                 && file_mapping_idx < self.file_mappings.len()
             {
@@ -442,9 +430,6 @@ impl HyperlightFSImage {
                 // Directories and FAT mounts don't have a direct host path
                 PathBuf::from("")
             };
-
-            #[cfg(not(unix))]
-            let host_path = PathBuf::from("");
 
             // FAT mounts show as directories in the listing
             let is_dir_or_fat = is_dir || is_fat;
@@ -470,14 +455,13 @@ impl HyperlightFSImage {
 
 impl std::fmt::Debug for HyperlightFSImage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut s = f.debug_struct("HyperlightFSImage");
-        s.field("inode_count", &self.inode_entries.len())
+        f.debug_struct("HyperlightFSImage")
+            .field("inode_count", &self.inode_entries.len())
             .field("ro_files_region_size", &self.ro_files_region_size)
-            .field("fat_region_size", &self.fat_region_size);
-        #[cfg(unix)]
-        s.field("file_mappings_count", &self.file_mappings.len())
-            .field("fat_mounts_count", &self.fat_mounts.len());
-        s.finish()
+            .field("fat_region_size", &self.fat_region_size)
+            .field("file_mappings_count", &self.file_mappings.len())
+            .field("fat_mounts_count", &self.fat_mounts.len())
+            .finish()
     }
 }
 
@@ -487,7 +471,6 @@ impl std::fmt::Debug for HyperlightFSImage {
 ///
 /// * `files` - Read-only file mappings from the builder
 /// * `fat_mounts` - FAT mount entries with images and mount points
-#[cfg(unix)]
 pub(super) fn build_image(
     mut files: Vec<MappedFile>,
     fat_mounts: Vec<super::builder::FatMountEntry>,
@@ -611,17 +594,6 @@ pub(super) fn build_image(
         ro_files_region_size,
         fat_region_size,
     })
-}
-
-/// Windows stub - not yet implemented.
-#[cfg(windows)]
-pub(super) fn build_image(
-    _files: Vec<MappedFile>,
-    _fat_mounts: Vec<super::builder::FatMountEntry>,
-) -> Result<HyperlightFSImage> {
-    Err(HyperlightError::Error(
-        "HyperlightFS is not yet supported on Windows".to_string(),
-    ))
 }
 
 #[cfg(test)]
