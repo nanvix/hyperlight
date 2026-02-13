@@ -16,7 +16,7 @@ limitations under the License.
 
 use log::LevelFilter;
 
-/// Userspace PIC/PIT emulation.
+/// Userspace PIC/PIT emulation for MSHV and WHP.
 #[cfg(feature = "hw-interrupts")]
 pub(crate) mod pic_pit;
 

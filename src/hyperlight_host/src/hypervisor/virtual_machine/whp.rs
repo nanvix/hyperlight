@@ -15,6 +15,8 @@ limitations under the License.
 */
 
 use std::os::raw::c_void;
+#[cfg(feature = "hw-interrupts")]
+use std::time::Instant;
 
 use hyperlight_common::mem::PAGE_SIZE_USIZE;
 use windows::Win32::Foundation::{FreeLibrary, HANDLE};
@@ -33,6 +35,8 @@ use crate::hypervisor::surrogate_process::SurrogateProcess;
 use crate::hypervisor::surrogate_process_manager::get_surrogate_process_manager;
 use crate::hypervisor::virtual_machine::{VirtualMachine, VmExit};
 use crate::hypervisor::wrappers::HandleWrapper;
+#[cfg(feature = "hw-interrupts")]
+use crate::hypervisor::pic_pit::{Pic, Pit};
 use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
 use crate::{Result, log_then_return, new_error};
 
@@ -70,6 +74,12 @@ pub(crate) struct WhpVm {
     // Used to reject later memory mapping since it's not supported  on windows.
     // TODO remove this flag once memory mapping is supported on windows.
     initial_memory_setup_done: bool,
+    #[cfg(feature = "hw-interrupts")]
+    pic: Pic,
+    #[cfg(feature = "hw-interrupts")]
+    pit: Pit,
+    #[cfg(feature = "hw-interrupts")]
+    last_tick: Instant,
 }
 
 // Safety: `WhpVm` is !Send because it holds `SurrogateProcess` which contains a raw pointer
@@ -104,6 +114,12 @@ impl WhpVm {
             surrogate_process,
             surrogate_offset: None,
             initial_memory_setup_done: false,
+            #[cfg(feature = "hw-interrupts")]
+            pic: Pic::new(),
+            #[cfg(feature = "hw-interrupts")]
+            pit: Pit::new(),
+            #[cfg(feature = "hw-interrupts")]
+            last_tick: Instant::now(),
         })
     }
 
@@ -206,84 +222,161 @@ impl VirtualMachine for WhpVm {
 
     #[expect(non_upper_case_globals, reason = "Windows API constant are lower case")]
     fn run_vcpu(&mut self) -> Result<VmExit> {
-        let mut exit_context: WHV_RUN_VP_EXIT_CONTEXT = Default::default();
-
-        unsafe {
-            WHvRunVirtualProcessor(
-                self.partition,
-                0,
-                &mut exit_context as *mut _ as *mut c_void,
-                std::mem::size_of::<WHV_RUN_VP_EXIT_CONTEXT>() as u32,
-            )?;
-        }
-
-        let result = match exit_context.ExitReason {
-            WHvRunVpExitReasonX64IoPortAccess => unsafe {
-                let instruction_length = exit_context.VpContext._bitfield & 0xF;
-                let rip = exit_context.VpContext.Rip + instruction_length as u64;
-                self.set_registers(&[(
-                    WHvX64RegisterRip,
-                    Align16(WHV_REGISTER_VALUE { Reg64: rip }),
-                )])?;
-                VmExit::IoOut(
-                    exit_context.Anonymous.IoPortAccess.PortNumber,
-                    exit_context
-                        .Anonymous
-                        .IoPortAccess
-                        .Rax
-                        .to_le_bytes()
-                        .to_vec(),
-                )
-            },
-            WHvRunVpExitReasonX64Halt => VmExit::Halt(),
-            WHvRunVpExitReasonMemoryAccess => {
-                let gpa = unsafe { exit_context.Anonymous.MemoryAccess.Gpa };
-                let access_info = unsafe {
-                    WHV_MEMORY_ACCESS_TYPE(
-                        // 2 first bits are the access type, see https://learn.microsoft.com/en-us/virtualization/api/hypervisor-platform/funcs/memoryaccess#syntax
-                        (exit_context.Anonymous.MemoryAccess.AccessInfo.AsUINT32 & 0b11) as i32,
-                    )
-                };
-                let access_info = MemoryRegionFlags::try_from(access_info)?;
-                match access_info {
-                    MemoryRegionFlags::READ => VmExit::MmioRead(gpa),
-                    MemoryRegionFlags::WRITE => VmExit::MmioWrite(gpa),
-                    _ => VmExit::Unknown("Unknown memory access type".to_string()),
+        loop {
+            // --- Timer injection (hw-interrupts only) ---
+            // Before each vCPU entry, check if a timer tick is due and inject
+            // an interrupt via WHvRegisterPendingInterruption.
+            #[cfg(feature = "hw-interrupts")]
+            if let Some(period) = self.pit.period() {
+                let elapsed = self.last_tick.elapsed();
+                if elapsed >= period {
+                    self.last_tick = Instant::now();
+                    let vector = self.pic.master_vector_base() as u64;
+                    // Format: bit 31 = valid, bits 10:8 = type (0 = external), bits 7:0 = vector
+                    let pending = vector | (1u64 << 31);
+                    self.set_registers(&[(
+                        WHvRegisterPendingInterruption,
+                        Align16(WHV_REGISTER_VALUE { Reg64: pending }),
+                    )])?;
                 }
             }
-            // Execution was cancelled by the host.
-            WHvRunVpExitReasonCanceled => VmExit::Cancelled(),
-            #[cfg(gdb)]
-            WHvRunVpExitReasonException => {
-                let exception = unsafe { exit_context.Anonymous.VpException };
 
-                // Get the DR6 register to see which breakpoint was hit
-                let dr6 = {
-                    let names = [WHvX64RegisterDr6];
-                    let mut out: [Align16<WHV_REGISTER_VALUE>; 1] = unsafe { std::mem::zeroed() };
-                    unsafe {
-                        WHvGetVirtualProcessorRegisters(
-                            self.partition,
-                            0,
-                            names.as_ptr(),
-                            1,
-                            out.as_mut_ptr() as *mut WHV_REGISTER_VALUE,
-                        )?;
+            let mut exit_context: WHV_RUN_VP_EXIT_CONTEXT = Default::default();
+
+            unsafe {
+                WHvRunVirtualProcessor(
+                    self.partition,
+                    0,
+                    &mut exit_context as *mut _ as *mut c_void,
+                    std::mem::size_of::<WHV_RUN_VP_EXIT_CONTEXT>() as u32,
+                )?;
+            }
+
+            let result = match exit_context.ExitReason {
+                WHvRunVpExitReasonX64IoPortAccess => unsafe {
+                    let instruction_length = exit_context.VpContext._bitfield & 0xF;
+                    let rip = exit_context.VpContext.Rip + instruction_length as u64;
+                    self.set_registers(&[(
+                        WHvX64RegisterRip,
+                        Align16(WHV_REGISTER_VALUE { Reg64: rip }),
+                    )])?;
+
+                    let access_info = exit_context.Anonymous.IoPortAccess.AccessInfo.AsUINT32;
+                    let is_write = access_info & 0x1 != 0;
+                    let access_size = ((access_info >> 1) & 0x7) as usize;
+                    let port = exit_context.Anonymous.IoPortAccess.PortNumber;
+                    let rax = exit_context.Anonymous.IoPortAccess.Rax;
+
+                    if is_write {
+                        // === IO OUT ===
+                        let mask = match access_size {
+                            1 => 0xFFu64,
+                            2 => 0xFFFFu64,
+                            4 => 0xFFFF_FFFFu64,
+                            _ => u64::MAX,
+                        };
+                        let data_val = rax & mask;
+
+                        #[cfg(feature = "hw-interrupts")]
+                        if self.handle_hw_io_out(port, data_val as u8) {
+                            continue; // re-enter vCPU
+                        }
+
+                        VmExit::IoOut(
+                            port,
+                            data_val.to_le_bytes()[..access_size.max(1)].to_vec(),
+                        )
+                    } else {
+                        // === IO IN ===
+                        #[cfg(feature = "hw-interrupts")]
+                        if let Some(val) = self.pic.handle_io_in(port) {
+                            // Set RAX with response value, preserving upper bits
+                            let mask = match access_size {
+                                1 => 0xFFu64,
+                                2 => 0xFFFFu64,
+                                4 => 0xFFFF_FFFFu64,
+                                _ => u64::MAX,
+                            };
+                            let new_rax = (rax & !mask) | (val as u64 & mask);
+                            self.set_registers(&[(
+                                WHvX64RegisterRax,
+                                Align16(WHV_REGISTER_VALUE { Reg64: new_rax }),
+                            )])?;
+                            continue; // re-enter vCPU
+                        }
+                        VmExit::IoIn(port, access_size as u8)
                     }
-                    unsafe { out[0].0.Reg64 }
-                };
-
-                VmExit::Debug {
-                    dr6,
-                    exception: exception.ExceptionType as u32,
+                },
+                WHvRunVpExitReasonX64Halt => {
+                    // When hw-interrupts are enabled and the PIT is configured,
+                    // HLT means "wait for the next interrupt". Sleep until the
+                    // next timer tick, inject the interrupt, and re-enter.
+                    #[cfg(feature = "hw-interrupts")]
+                    if let Some(period) = self.pit.period() {
+                        let elapsed = self.last_tick.elapsed();
+                        if elapsed < period {
+                            std::thread::sleep(period - elapsed);
+                        }
+                        self.last_tick = Instant::now();
+                        let vector = self.pic.master_vector_base() as u64;
+                        let pending = vector | (1u64 << 31);
+                        self.set_registers(&[(
+                            WHvRegisterPendingInterruption,
+                            Align16(WHV_REGISTER_VALUE { Reg64: pending }),
+                        )])?;
+                        continue; // re-enter vCPU
+                    }
+                    VmExit::Halt()
                 }
-            }
-            WHV_RUN_VP_EXIT_REASON(_) => VmExit::Unknown(format!(
-                "Unknown exit reason '{}'",
-                exit_context.ExitReason.0
-            )),
-        };
-        Ok(result)
+                WHvRunVpExitReasonMemoryAccess => {
+                    let gpa = unsafe { exit_context.Anonymous.MemoryAccess.Gpa };
+                    let access_info = unsafe {
+                        WHV_MEMORY_ACCESS_TYPE(
+                            // 2 first bits are the access type, see https://learn.microsoft.com/en-us/virtualization/api/hypervisor-platform/funcs/memoryaccess#syntax
+                            (exit_context.Anonymous.MemoryAccess.AccessInfo.AsUINT32 & 0b11) as i32,
+                        )
+                    };
+                    let access_info = MemoryRegionFlags::try_from(access_info)?;
+                    match access_info {
+                        MemoryRegionFlags::READ => VmExit::MmioRead(gpa),
+                        MemoryRegionFlags::WRITE => VmExit::MmioWrite(gpa),
+                        _ => VmExit::Unknown("Unknown memory access type".to_string()),
+                    }
+                }
+                // Execution was cancelled by the host.
+                WHvRunVpExitReasonCanceled => VmExit::Cancelled(),
+                #[cfg(gdb)]
+                WHvRunVpExitReasonException => {
+                    let exception = unsafe { exit_context.Anonymous.VpException };
+
+                    // Get the DR6 register to see which breakpoint was hit
+                    let dr6 = {
+                        let names = [WHvX64RegisterDr6];
+                        let mut out: [Align16<WHV_REGISTER_VALUE>; 1] = unsafe { std::mem::zeroed() };
+                        unsafe {
+                            WHvGetVirtualProcessorRegisters(
+                                self.partition,
+                                0,
+                                names.as_ptr(),
+                                1,
+                                out.as_mut_ptr() as *mut WHV_REGISTER_VALUE,
+                            )?;
+                        }
+                        unsafe { out[0].0.Reg64 }
+                    };
+
+                    VmExit::Debug {
+                        dr6,
+                        exception: exception.ExceptionType as u32,
+                    }
+                }
+                WHV_RUN_VP_EXIT_REASON(_) => VmExit::Unknown(format!(
+                    "Unknown exit reason '{}'",
+                    exit_context.ExitReason.0
+                )),
+            };
+            return Ok(result);
+        }
     }
 
     fn regs(&self) -> Result<CommonRegisters> {
@@ -447,6 +540,43 @@ impl VirtualMachine for WhpVm {
     /// Get the partition handle for this VM
     fn partition_handle(&self) -> WHV_PARTITION_HANDLE {
         self.partition
+    }
+}
+
+#[cfg(feature = "hw-interrupts")]
+impl WhpVm {
+    /// Handle an IO OUT to a hardware emulation port (PIC, PIT, speaker, IO wait).
+    /// Returns true if the port was handled internally.
+    fn handle_hw_io_out(&mut self, port: u16, val: u8) -> bool {
+        // PIC ports
+        if self.pic.handle_io_out(port, val) {
+            return true;
+        }
+
+        // PIT command register
+        if port == 0x43 {
+            self.pit.handle_command(val);
+            return true;
+        }
+
+        // PIT channel 0 data
+        if port == 0x40 {
+            self.pit.handle_data(val);
+            return true;
+        }
+
+        // Speaker port (0x61) -- silently ignore
+        // Equivalent to KVM's KVM_PIT_SPEAKER_DUMMY
+        if port == 0x61 {
+            return true;
+        }
+
+        // IO wait port (0x80) -- silently ignore (timing delay)
+        if port == 0x80 {
+            return true;
+        }
+
+        false
     }
 }
 
