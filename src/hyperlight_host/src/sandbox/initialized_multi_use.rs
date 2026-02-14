@@ -109,7 +109,6 @@ pub struct MultiUseSandbox {
     ///
     /// Note: This field also provides access to FAT mounts for the host extraction APIs
     /// (fs_stat, fs_read_file, fs_read_dir, fs_write_file).
-    #[cfg(unix)]
     hyperlight_fs: Option<crate::hyperlight_fs::HyperlightFSImage>,
 }
 
@@ -126,7 +125,7 @@ impl MultiUseSandbox {
         vm: HyperlightVm,
         dispatch_ptr: RawPtr,
         #[cfg(gdb)] dbg_mem_access_fn: Arc<Mutex<SandboxMemoryManager<HostSharedMemory>>>,
-        #[cfg(unix)] hyperlight_fs: Option<crate::hyperlight_fs::HyperlightFSImage>,
+        hyperlight_fs: Option<crate::hyperlight_fs::HyperlightFSImage>,
     ) -> MultiUseSandbox {
         Self {
             id: super::snapshot::SANDBOX_CONFIGURATION_COUNTER.fetch_add(1, Ordering::Relaxed),
@@ -138,7 +137,6 @@ impl MultiUseSandbox {
             #[cfg(gdb)]
             dbg_mem_access_fn,
             snapshot: None,
-            #[cfg(unix)]
             hyperlight_fs,
         }
     }
@@ -647,7 +645,6 @@ impl MultiUseSandbox {
             // because the guest may have written data even if it returns an error.
             // However, we skip this on host-side errors (dispatch_call_from_host
             // returns Err) to avoid persisting potentially corrupted state.
-            #[cfg(unix)]
             if let Some(ref fs_image) = self.hyperlight_fs {
                 // Log but don't fail the call if msync fails - the writes are
                 // still in the page cache and will eventually be flushed.

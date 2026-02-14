@@ -147,14 +147,38 @@ impl WhpVm {
 
 impl VirtualMachine for WhpVm {
     unsafe fn map_memory(&mut self, (_slot, region): (u32, &MemoryRegion)) -> Result<()> {
-        // Only allow memory mapping during initial setup (the first batch of regions).
-        // After the initial setup is complete, subsequent calls should fail,
-        // since it's not yet implemented.
+        // After the initial contiguous memory setup, use WHvMapGpaRange to map
+        // additional regions (e.g., HyperlightFS) directly from the current
+        // process's address space.
         if self.initial_memory_setup_done {
-            // Initial setup already completed - reject this mapping
-            log_then_return!(
-                "Mapping host memory into the guest not yet supported on this platform"
-            );
+            let flags = region
+                .flags
+                .iter()
+                .map(|flag| match flag {
+                    MemoryRegionFlags::NONE => Ok(WHvMapGpaRangeFlagNone),
+                    MemoryRegionFlags::READ => Ok(WHvMapGpaRangeFlagRead),
+                    MemoryRegionFlags::WRITE => Ok(WHvMapGpaRangeFlagWrite),
+                    MemoryRegionFlags::EXECUTE => Ok(WHvMapGpaRangeFlagExecute),
+                    MemoryRegionFlags::STACK_GUARD => Ok(WHvMapGpaRangeFlagNone),
+                    _ => Err(new_error!("Invalid Memory Region Flag")),
+                })
+                .collect::<Result<Vec<WHV_MAP_GPA_RANGE_FLAGS>>>()?
+                .iter()
+                .fold(WHvMapGpaRangeFlagNone, |acc, flag| acc | *flag);
+
+            let source_addr = region.host_region.start as *const c_void;
+
+            unsafe {
+                WHvMapGpaRange(
+                    self.partition,
+                    source_addr,
+                    region.guest_region.start as u64,
+                    region.guest_region.len() as u64,
+                    flags,
+                )?;
+            }
+
+            return Ok(());
         }
 
         // Calculate the offset on first call. The offset accounts for the guard page

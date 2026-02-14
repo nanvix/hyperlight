@@ -100,13 +100,17 @@ fn validate_and_normalize_guest_path(
         )));
     }
 
-    let p = Path::new(path);
-    if !p.is_absolute() {
+    // Use starts_with('/') instead of Path::is_absolute() because guest paths
+    // are Unix-style paths. On Windows, Path::is_absolute() returns false for
+    // "/lib" since it's relative to the current drive, but for guest filesystem
+    // purposes it IS absolute.
+    if !path.starts_with('/') {
         return Err(HyperlightError::Error(format!(
             "Invalid guest {path_type} {:?}: must be absolute (start with '/')",
             path
         )));
     }
+    let p = Path::new(path);
 
     let mut parts = Vec::new();
     for comp in p.components() {

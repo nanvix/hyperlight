@@ -14,7 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-#[cfg(unix)]
 use std::path::Path;
 #[cfg(gdb)]
 use std::sync::{Arc, Mutex};
@@ -27,7 +26,6 @@ use super::SandboxConfiguration;
 use super::uninitialized::SandboxRuntimeConfig;
 use crate::hypervisor::hyperlight_vm::HyperlightVm;
 use crate::mem::exe::LoadInfo;
-#[cfg(unix)]
 use crate::mem::memory_region::MemoryRegionFlags;
 use crate::mem::mgr::SandboxMemoryManager;
 use crate::mem::ptr::{GuestPtr, RawPtr};
@@ -54,7 +52,6 @@ pub(super) fn evolve_impl_multi_use(u_sbox: UninitializedSandbox) -> Result<Mult
 
     // Wire up HyperlightFS BEFORE vm.initialise() so the guest entrypoint
     // can read the manifest from the PEB during initialization
-    #[cfg(unix)]
     if let Some(fs_image) = &u_sbox.hyperlight_fs {
         wire_hyperlight_fs(&mut vm, &gshm.layout, &mut hshm.shared_mem, fs_image)?;
     }
@@ -104,7 +101,6 @@ pub(super) fn evolve_impl_multi_use(u_sbox: UninitializedSandbox) -> Result<Mult
         dispatch_ptr,
         #[cfg(gdb)]
         dbg_mem_wrapper,
-        #[cfg(unix)]
         u_sbox.hyperlight_fs,
     );
 
@@ -354,6 +350,247 @@ fn map_file_cow_to_vm(
             libc::munmap(base, size);
             return Err(err);
         };
+
+        Ok(size as u64)
+    }
+}
+
+/// Windows implementation of wire_hyperlight_fs.
+///
+/// Uses VirtualAlloc for manifest memory and CreateFileMappingW/MapViewOfFile
+/// for mapping files into the host address space, then maps everything into
+/// the guest via vm.map_region (WHP).
+#[cfg(windows)]
+#[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
+fn wire_hyperlight_fs(
+    vm: &mut HyperlightVm,
+    layout: &crate::mem::layout::SandboxMemoryLayout,
+    shared_mem: &mut crate::mem::shared_mem::HostSharedMemory,
+    fs_image: &crate::hyperlight_fs::HyperlightFSImage,
+) -> Result<()> {
+    use tracing::info;
+    use windows::Win32::System::Memory::*;
+
+    use crate::mem::layout::SandboxMemoryLayout;
+    use crate::mem::memory_region::{MemoryRegion, MemoryRegionType};
+
+    let page_size = page_size::get() as u64;
+
+    // Compute the manifest base address (page-aligned, after contiguous memory)
+    let contiguous_mem_size = layout.get_memory_size()?;
+    let fs_manifest_addr =
+        ((SandboxMemoryLayout::BASE_ADDRESS + contiguous_mem_size) as u64 + page_size - 1)
+            & !(page_size - 1);
+
+    // Estimate manifest size to compute where files will go
+    let manifest_size_estimate = fs_image.estimate_manifest_size() as u64;
+    let fs_files_addr = fs_manifest_addr + manifest_size_estimate;
+
+    info!(
+        fs_manifest_addr = format_args!("{:#x}", fs_manifest_addr),
+        manifest_size_estimate,
+        fs_files_addr = format_args!("{:#x}", fs_files_addr),
+        file_count = fs_image.file_mappings().len(),
+        total_files_size = fs_image.mapped_files_region_size(),
+        "Wiring HyperlightFS into sandbox"
+    );
+
+    // Generate the manifest with the computed files base address
+    let manifest_data = fs_image.generate_manifest(fs_files_addr)?;
+    let manifest_len = manifest_data.len();
+
+    // Verify our estimate was sufficient (manifest fits in estimated space)
+    let manifest_len_aligned = ((manifest_len as u64 + page_size - 1) & !(page_size - 1)) as usize;
+    if manifest_len_aligned > manifest_size_estimate as usize {
+        return Err(crate::HyperlightError::Error(format!(
+            "Manifest size {} exceeds estimate {}",
+            manifest_len_aligned, manifest_size_estimate
+        )));
+    }
+
+    // Allocate host memory for manifest using VirtualAlloc
+    let manifest_host_ptr = unsafe {
+        let ptr = VirtualAlloc(
+            None,
+            manifest_len_aligned,
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_READWRITE,
+        );
+        if ptr.is_null() {
+            return Err(crate::HyperlightError::Error(format!(
+                "Failed to allocate manifest memory: {:?}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        // Copy manifest data
+        std::ptr::copy_nonoverlapping(manifest_data.as_ptr(), ptr as *mut u8, manifest_len);
+        // Make read-only
+        let mut old_protect = PAGE_PROTECTION_FLAGS(0);
+        if let Err(e) = VirtualProtect(ptr, manifest_len_aligned, PAGE_READONLY, &mut old_protect) {
+            let _ = VirtualFree(ptr, 0, MEM_RELEASE);
+            return Err(crate::HyperlightError::Error(format!(
+                "Failed to set manifest memory read-only: {}",
+                e
+            )));
+        }
+        ptr
+    };
+
+    // Map manifest into guest memory
+    if let Err(err) = unsafe {
+        vm.map_region(&MemoryRegion {
+            host_region: manifest_host_ptr as usize
+                ..manifest_host_ptr as usize + manifest_len_aligned,
+            guest_region: fs_manifest_addr as usize
+                ..fs_manifest_addr as usize + manifest_len_aligned,
+            flags: MemoryRegionFlags::READ,
+            region_type: MemoryRegionType::HyperlightFS,
+        })
+    } {
+        unsafe {
+            let _ = VirtualFree(manifest_host_ptr, 0, MEM_RELEASE);
+        }
+        return Err(err);
+    }
+
+    info!(
+        guest_addr = format_args!("{:#x}", fs_manifest_addr),
+        size = manifest_len,
+        "Mapped manifest into guest"
+    );
+
+    // Map each file into guest memory with READ-only permissions
+    let mut current_addr = fs_files_addr;
+    for mapping in fs_image.file_mappings() {
+        let mapped_size = map_file_cow_to_vm(
+            vm,
+            mapping.host_path(),
+            current_addr,
+            MemoryRegionFlags::READ,
+        )?;
+
+        info!(
+            guest_path = %mapping.guest_path(),
+            guest_addr = format_args!("{:#x}", current_addr),
+            size = mapped_size,
+            "Mapped file into guest"
+        );
+
+        current_addr += mapped_size;
+    }
+
+    // Map FAT mounts into guest memory with READ|WRITE permissions.
+    for fat_mount in fs_image.fat_mounts() {
+        let fat_ptr = fat_mount.image().as_ptr();
+        let fat_size = fat_mount.image().size();
+        let page_size = page_size::get();
+        let fat_size_aligned = (fat_size + page_size - 1) & !(page_size - 1);
+
+        unsafe {
+            vm.map_region(&MemoryRegion {
+                host_region: fat_ptr as usize..fat_ptr as usize + fat_size_aligned,
+                guest_region: current_addr as usize..current_addr as usize + fat_size_aligned,
+                flags: MemoryRegionFlags::READ | MemoryRegionFlags::WRITE,
+                region_type: MemoryRegionType::HyperlightFS,
+            })?;
+        }
+
+        info!(
+            mount_point = %fat_mount.mount_point(),
+            guest_addr = format_args!("{:#x}", current_addr),
+            size = fat_size,
+            "Mapped FAT mount into guest (READ|WRITE)"
+        );
+
+        current_addr += fat_size_aligned as u64;
+    }
+
+    // Calculate the total files region size (RO + FAT)
+    let fs_files_region_size = current_addr - fs_files_addr;
+
+    // Write manifest location to PEB
+    layout.set_guest_fs_manifest(shared_mem, fs_manifest_addr, manifest_len as u64)?;
+
+    // Write files region location to PEB
+    layout.set_guest_fs_region(shared_mem, fs_files_addr, fs_files_region_size)?;
+
+    info!(
+        manifest_addr = format_args!("{:#x}", fs_manifest_addr),
+        manifest_size = manifest_len,
+        files_addr = format_args!("{:#x}", fs_files_addr),
+        files_size = fs_files_region_size,
+        "HyperlightFS wired into sandbox PEB"
+    );
+
+    Ok(())
+}
+
+/// Windows helper to map a file into guest memory via the VM directly.
+/// Allocates page-aligned memory, reads the file into it, and maps into guest.
+#[cfg(windows)]
+fn map_file_cow_to_vm(
+    vm: &mut HyperlightVm,
+    fp: &Path,
+    guest_base: u64,
+    flags: MemoryRegionFlags,
+) -> Result<u64> {
+    use std::io::Read;
+
+    use windows::Win32::System::Memory::*;
+
+    use crate::mem::memory_region::{MemoryRegion, MemoryRegionType};
+
+    let mut file = std::fs::File::options().read(true).open(fp)?;
+    let file_size = file.metadata()?.len() as usize;
+    let page_size = page_size::get();
+    let size = file_size.div_ceil(page_size) * page_size;
+
+    unsafe {
+        // Allocate page-aligned memory
+        let ptr = VirtualAlloc(
+            None,
+            size,
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_READWRITE,
+        );
+        if ptr.is_null() {
+            return Err(crate::HyperlightError::Error(format!(
+                "VirtualAlloc failed for {:?}: {:?}",
+                fp,
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        // Read file contents into the allocated memory
+        let buf = std::slice::from_raw_parts_mut(ptr as *mut u8, file_size);
+        file.read_exact(buf).map_err(|e| {
+            let _ = VirtualFree(ptr, 0, MEM_RELEASE);
+            crate::HyperlightError::Error(format!("Failed to read {:?}: {}", fp, e))
+        })?;
+
+        // Make read-only (matching the requested flags)
+        if !flags.contains(MemoryRegionFlags::WRITE) {
+            let mut old_protect = PAGE_PROTECTION_FLAGS(0);
+            if let Err(e) = VirtualProtect(ptr, size, PAGE_READONLY, &mut old_protect) {
+                let _ = VirtualFree(ptr, 0, MEM_RELEASE);
+                return Err(crate::HyperlightError::Error(format!(
+                    "VirtualProtect failed for {:?}: {}",
+                    fp, e
+                )));
+            }
+        }
+
+        let base = ptr as usize;
+
+        if let Err(err) = vm.map_region(&MemoryRegion {
+            host_region: base..base + size,
+            guest_region: guest_base as usize..guest_base as usize + size,
+            flags,
+            region_type: MemoryRegionType::HyperlightFS,
+        }) {
+            let _ = VirtualFree(ptr, 0, MEM_RELEASE);
+            return Err(err);
+        }
 
         Ok(size as u64)
     }
