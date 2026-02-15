@@ -119,6 +119,7 @@ impl HyperlightVm {
         #[cfg(not(gdb))]
         type VmType = Box<dyn VirtualMachine>;
 
+        let tv0 = std::time::Instant::now();
         #[cfg_attr(not(gdb), allow(unused_mut))]
         let mut vm: VmType = match get_available_hypervisor() {
             #[cfg(kvm)]
@@ -129,20 +130,25 @@ impl HyperlightVm {
             Some(HypervisorType::Whp) => Box::new(WhpVm::new(handle, raw_size)?),
             None => return Err(NoHypervisorFound()),
         };
+        eprintln!("[TIMING]   HyperlightVm::new: VmType::new(): {:?}", tv0.elapsed());
 
+        let tv1 = std::time::Instant::now();
         for (i, region) in mem_regions.iter().enumerate() {
             // Safety: slots are unique and region points to valid memory since we created the regions
             unsafe { vm.map_memory((i as u32, region))? };
         }
+        eprintln!("[TIMING]   HyperlightVm::new: map_memory ({} regions): {:?}", mem_regions.len(), tv1.elapsed());
 
         // Mark initial setup as complete for Windows - subsequent map_memory calls will fail
         #[cfg(target_os = "windows")]
         vm.complete_initial_memory_setup();
 
+        let tv2 = std::time::Instant::now();
         #[cfg(feature = "init-paging")]
         vm.set_sregs(&CommonSpecialRegisters::standard_64bit_defaults(_pml4_addr))?;
         #[cfg(not(feature = "init-paging"))]
         vm.set_sregs(&CommonSpecialRegisters::standard_real_mode_defaults())?;
+        eprintln!("[TIMING]   HyperlightVm::new: set_sregs: {:?}", tv2.elapsed());
         let rsp_gp = GuestPtr::try_from(RawPtr::from(rsp))?;
 
         #[cfg(any(kvm, mshv3))]

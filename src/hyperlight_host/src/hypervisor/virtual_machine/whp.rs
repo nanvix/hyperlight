@@ -92,6 +92,7 @@ unsafe impl Send for WhpVm {}
 impl WhpVm {
     pub(crate) fn new(mmap_file_handle: HandleWrapper, raw_size: usize) -> Result<Self> {
         const NUM_CPU: u32 = 1;
+        let tw0 = std::time::Instant::now();
         let partition = unsafe {
             let partition = WHvCreatePartition()?;
             WHvSetPartitionProperty(
@@ -104,10 +105,13 @@ impl WhpVm {
             WHvCreateVirtualProcessor(partition, 0, 0)?;
             partition
         };
+        eprintln!("[TIMING]     WhpVm::new: WHP partition+vcpu: {:?}", tw0.elapsed());
 
         // Create the surrogate process with the total memory size
+        let tw1 = std::time::Instant::now();
         let mgr = get_surrogate_process_manager()?;
         let surrogate_process = mgr.get_surrogate_process(raw_size, mmap_file_handle)?;
+        eprintln!("[TIMING]     WhpVm::new: surrogate process: {:?}", tw1.elapsed());
 
         Ok(WhpVm {
             partition,
