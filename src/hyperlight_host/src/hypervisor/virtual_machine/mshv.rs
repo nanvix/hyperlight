@@ -303,6 +303,7 @@ impl VirtualMachine for MshvVm {
                     }
                 },
             }
+        }
     }
 
     fn regs(&self) -> Result<CommonRegisters> {
