@@ -80,6 +80,10 @@ pub(crate) struct WhpVm {
     pit: Pit,
     #[cfg(feature = "hw-interrupts")]
     last_tick: Instant,
+    // Cached RFLAGS from the last vCPU exit context, used for timer
+    // injection decisions without an extra WHvGetVirtualProcessorRegisters call.
+    #[cfg(feature = "hw-interrupts")]
+    cached_rflags: u64,
 }
 
 // Safety: `WhpVm` is !Send because it holds `SurrogateProcess` which contains a raw pointer
@@ -124,6 +128,8 @@ impl WhpVm {
             pit: Pit::new(),
             #[cfg(feature = "hw-interrupts")]
             last_tick: Instant::now(),
+            #[cfg(feature = "hw-interrupts")]
+            cached_rflags: 0,
         })
     }
 
@@ -255,6 +261,7 @@ impl VirtualMachine for WhpVm {
         let mut exit_halt: u64 = 0;
         let mut exit_mem: u64 = 0;
         let mut exit_other: u64 = 0;
+        let mut exit_intwin: u64 = 0;
         let mut timer_injects: u64 = 0;
         let mut timer_checks: u64 = 0;
         let t_run = std::time::Instant::now();
@@ -263,28 +270,15 @@ impl VirtualMachine for WhpVm {
             // --- Timer injection (hw-interrupts only) ---
             // Before each vCPU entry, check if a timer tick is due and the guest
             // can accept interrupts (IF=1), then inject via WHvRegisterPendingInterruption.
+            // Uses cached RFLAGS from the previous exit context to avoid an expensive
+            // WHvGetVirtualProcessorRegisters call.  When IF=0, requests an interrupt
+            // window exit so WHP notifies us as soon as the guest enables interrupts.
             #[cfg(feature = "hw-interrupts")]
             if let Some(period) = self.pit.period() {
                 let elapsed = self.last_tick.elapsed();
                 if elapsed >= period {
                     timer_checks += 1;
-                    // Read RFLAGS to check if interrupts are enabled (IF = bit 9).
-                    let rflags = {
-                        let names = [WHvX64RegisterRflags];
-                        let mut values: [Align16<WHV_REGISTER_VALUE>; 1] =
-                            unsafe { std::mem::zeroed() };
-                        unsafe {
-                            WHvGetVirtualProcessorRegisters(
-                                self.partition,
-                                0,
-                                names.as_ptr(),
-                                1,
-                                values.as_mut_ptr() as *mut WHV_REGISTER_VALUE,
-                            )?;
-                            values[0].0.Reg64
-                        }
-                    };
-                    let interrupts_enabled = rflags & (1 << 9) != 0;
+                    let interrupts_enabled = self.cached_rflags & (1 << 9) != 0;
 
                     if interrupts_enabled {
                         timer_injects += 1;
@@ -295,6 +289,13 @@ impl VirtualMachine for WhpVm {
                         self.set_registers(&[(
                             WHvRegisterPendingInterruption,
                             Align16(WHV_REGISTER_VALUE { Reg64: pending }),
+                        )])?;
+                    } else {
+                        // IF=0: request an interrupt window exit so WHP exits as
+                        // soon as the guest sets IF=1 during execution.
+                        self.set_registers(&[(
+                            WHvX64RegisterDeliverabilityNotifications,
+                            Align16(WHV_REGISTER_VALUE { Reg64: 1 }), // bit 0 = InterruptNotification
                         )])?;
                     }
                 }
@@ -311,7 +312,31 @@ impl VirtualMachine for WhpVm {
                 )?;
             }
 
+            // Cache RFLAGS from the exit context for the next timer check.
+            #[cfg(feature = "hw-interrupts")]
+            {
+                self.cached_rflags = exit_context.VpContext.Rflags;
+            }
+
             let result = match exit_context.ExitReason {
+                // Interrupt window: the guest just enabled IF=1 after we
+                // requested a deliverability notification.  Inject the
+                // pending timer interrupt and re-enter immediately.
+                WHvRunVpExitReasonX64InterruptWindow => {
+                    exit_intwin += 1;
+                    #[cfg(feature = "hw-interrupts")]
+                    if let Some(_period) = self.pit.period() {
+                        timer_injects += 1;
+                        self.last_tick = Instant::now();
+                        let vector = self.pic.master_vector_base() as u64;
+                        let pending = vector | (1u64 << 31);
+                        self.set_registers(&[(
+                            WHvRegisterPendingInterruption,
+                            Align16(WHV_REGISTER_VALUE { Reg64: pending }),
+                        )])?;
+                    }
+                    continue;
+                }
                 WHvRunVpExitReasonX64IoPortAccess => unsafe {
                     exit_io += 1;
                     let instruction_length = exit_context.VpContext._bitfield & 0xF;
@@ -443,8 +468,8 @@ impl VirtualMachine for WhpVm {
                 ))}
             };
             crate::timing!(
-                "[TIMING]   run_vcpu: {:?}, exits: io={} halt={} mem={} other={}, timer: checks={} injects={}",
-                t_run.elapsed(), exit_io, exit_halt, exit_mem, exit_other, timer_checks, timer_injects
+                "[TIMING]   run_vcpu: {:?}, exits: io={} halt={} intwin={} mem={} other={}, timer: checks={} injects={}",
+                t_run.elapsed(), exit_io, exit_halt, exit_intwin, exit_mem, exit_other, timer_checks, timer_injects
             );
             return Ok(result);
         }
