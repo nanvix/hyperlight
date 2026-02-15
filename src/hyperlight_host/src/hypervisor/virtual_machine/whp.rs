@@ -250,6 +250,15 @@ impl VirtualMachine for WhpVm {
 
     #[expect(non_upper_case_globals, reason = "Windows API constant are lower case")]
     fn run_vcpu(&mut self) -> Result<VmExit> {
+        // VM exit counters for timing diagnostics
+        let mut exit_io: u64 = 0;
+        let mut exit_halt: u64 = 0;
+        let mut exit_mem: u64 = 0;
+        let mut exit_other: u64 = 0;
+        let mut timer_injects: u64 = 0;
+        let mut timer_checks: u64 = 0;
+        let t_run = std::time::Instant::now();
+
         loop {
             // --- Timer injection (hw-interrupts only) ---
             // Before each vCPU entry, check if a timer tick is due and the guest
@@ -258,6 +267,7 @@ impl VirtualMachine for WhpVm {
             if let Some(period) = self.pit.period() {
                 let elapsed = self.last_tick.elapsed();
                 if elapsed >= period {
+                    timer_checks += 1;
                     // Read RFLAGS to check if interrupts are enabled (IF = bit 9).
                     let rflags = {
                         let names = [WHvX64RegisterRflags];
@@ -277,6 +287,7 @@ impl VirtualMachine for WhpVm {
                     let interrupts_enabled = rflags & (1 << 9) != 0;
 
                     if interrupts_enabled {
+                        timer_injects += 1;
                         self.last_tick = Instant::now();
                         let vector = self.pic.master_vector_base() as u64;
                         // Format: bit 31 = valid, bits 10:8 = type (0 = external), bits 7:0 = vector
@@ -302,6 +313,7 @@ impl VirtualMachine for WhpVm {
 
             let result = match exit_context.ExitReason {
                 WHvRunVpExitReasonX64IoPortAccess => unsafe {
+                    exit_io += 1;
                     let instruction_length = exit_context.VpContext._bitfield & 0xF;
                     let rip = exit_context.VpContext.Rip + instruction_length as u64;
                     self.set_registers(&[(
@@ -356,6 +368,7 @@ impl VirtualMachine for WhpVm {
                     }
                 },
                 WHvRunVpExitReasonX64Halt => {
+                    exit_halt += 1;
                     // When hw-interrupts are enabled and the PIT is configured,
                     // HLT means "wait for the next interrupt". Sleep until the
                     // next timer tick, inject the interrupt, and re-enter.
@@ -377,6 +390,7 @@ impl VirtualMachine for WhpVm {
                     VmExit::Halt()
                 }
                 WHvRunVpExitReasonMemoryAccess => {
+                    exit_mem += 1;
                     let gpa = unsafe { exit_context.Anonymous.MemoryAccess.Gpa };
                     let access_info = unsafe {
                         WHV_MEMORY_ACCESS_TYPE(
@@ -392,7 +406,10 @@ impl VirtualMachine for WhpVm {
                     }
                 }
                 // Execution was cancelled by the host.
-                WHvRunVpExitReasonCanceled => VmExit::Cancelled(),
+                WHvRunVpExitReasonCanceled => {
+                    exit_other += 1;
+                    VmExit::Cancelled()
+                }
                 #[cfg(gdb)]
                 WHvRunVpExitReasonException => {
                     let exception = unsafe { exit_context.Anonymous.VpException };
@@ -418,11 +435,17 @@ impl VirtualMachine for WhpVm {
                         exception: exception.ExceptionType as u32,
                     }
                 }
-                WHV_RUN_VP_EXIT_REASON(_) => VmExit::Unknown(format!(
+                WHV_RUN_VP_EXIT_REASON(_) => {
+                    exit_other += 1;
+                    VmExit::Unknown(format!(
                     "Unknown exit reason '{}'",
                     exit_context.ExitReason.0
-                )),
+                ))}
             };
+            crate::timing!(
+                "[TIMING]   run_vcpu: {:?}, exits: io={} halt={} mem={} other={}, timer: checks={} injects={}",
+                t_run.elapsed(), exit_io, exit_halt, exit_mem, exit_other, timer_checks, timer_injects
+            );
             return Ok(result);
         }
     }
