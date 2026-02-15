@@ -16,7 +16,7 @@ limitations under the License.
 
 use std::os::raw::c_void;
 #[cfg(feature = "hw-interrupts")]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use hyperlight_common::mem::PAGE_SIZE_USIZE;
 use windows::Win32::Foundation::{FreeLibrary, HANDLE};
@@ -39,6 +39,17 @@ use crate::hypervisor::wrappers::HandleWrapper;
 use crate::hypervisor::pic_pit::{Pic, Pit};
 use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
 use crate::{Result, log_then_return, new_error};
+
+/// Minimum effective timer period for WHP timer interrupt injection.
+///
+/// WHP timer injection requires interrupt window exits + pending interruption
+/// register writes, which are more expensive than KVM's in-kernel irqchip.
+/// Additionally, the guest timer ISR (scheduler, bookkeeping) runs on each
+/// injection. Clamping to 50ms (20 Hz) provides sufficient timer granularity
+/// for preemptive scheduling while minimizing host-side API call overhead and
+/// guest ISR execution time.
+#[cfg(feature = "hw-interrupts")]
+const WHP_MIN_TIMER_PERIOD: Duration = Duration::from_millis(50);
 
 #[allow(dead_code)] // Will be used for runtime hypervisor detection
 pub(crate) fn is_hypervisor_present() -> bool {
@@ -275,8 +286,9 @@ impl VirtualMachine for WhpVm {
             // window exit so WHP notifies us as soon as the guest enables interrupts.
             #[cfg(feature = "hw-interrupts")]
             if let Some(period) = self.pit.period() {
+                let effective_period = period.max(WHP_MIN_TIMER_PERIOD);
                 let elapsed = self.last_tick.elapsed();
-                if elapsed >= period {
+                if elapsed >= effective_period {
                     timer_checks += 1;
                     let interrupts_enabled = self.cached_rflags & (1 << 9) != 0;
 
