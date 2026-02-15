@@ -61,7 +61,18 @@ pub(crate) const SURROGATE_PROCESS_BINARY_NAME: &str = "hyperlight_surrogate.exe
 
 /// The maximum number of surrogate processes that can be created.
 /// (This is a factor of limitations in the `WHvMapGpaRange2` API which only allows 512 different process handles).
-const NUMBER_OF_SURROGATE_PROCESSES: usize = 512;
+const MAX_SURROGATE_PROCESSES: usize = 512;
+
+/// Returns the number of surrogate processes to create.
+/// Reads from the `HYPERLIGHT_SURROGATE_COUNT` environment variable if set,
+/// otherwise defaults to `MAX_SURROGATE_PROCESSES`.
+fn number_of_surrogate_processes() -> usize {
+    std::env::var("HYPERLIGHT_SURROGATE_COUNT")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .map(|n| n.min(MAX_SURROGATE_PROCESSES).max(1))
+        .unwrap_or(MAX_SURROGATE_PROCESSES)
+}
 
 /// `SurrogateProcessManager` manages hyperlight_surrogate processes. These
 /// processes are required to allow multiple WHP Partitions to be created in a
@@ -229,7 +240,7 @@ impl SurrogateProcessManager {
         surrogate_process_path: &Path,
         job_handle: HandleWrapper,
     ) -> Result<()> {
-        for _ in 0..NUMBER_OF_SURROGATE_PROCESSES {
+        for _ in 0..number_of_surrogate_processes() {
             let surrogate_process = create_surrogate_process(surrogate_process_path, job_handle)?;
             self.process_sender.clone().send(surrogate_process)?;
         }
@@ -436,7 +447,7 @@ mod tests {
         // create more threads than surrogate processes as we want to test that
         // the manager can handle multiple threads requesting processes at the
         // same time when there are not enough processes available.
-        for t in 0..NUMBER_OF_SURROGATE_PROCESSES * 2 {
+        for t in 0..MAX_SURROGATE_PROCESSES * 2 {
             let thread_handle = thread::spawn(move || -> Result<()> {
                 let surrogate_process_manager_res = get_surrogate_process_manager();
                 let mut rng = rng();
@@ -447,7 +458,7 @@ mod tests {
                 // for each of the parent loop iterations, try to get a
                 // surrogate process, make sure we actually got one,
                 // then put it back
-                for p in 0..NUMBER_OF_SURROGATE_PROCESSES {
+                for p in 0..MAX_SURROGATE_PROCESSES {
                     let dwmaximumsizehigh = 0;
                     let dwmaximumsizelow = (size & 0xFFFFFFFF) as u32;
                     let handle = unsafe {
@@ -507,7 +518,7 @@ mod tests {
             assert!(thread_handle.join().is_ok());
         }
 
-        assert_number_of_surrogate_processes(NUMBER_OF_SURROGATE_PROCESSES);
+        assert_number_of_surrogate_processes(number_of_surrogate_processes());
     }
 
     #[track_caller]
