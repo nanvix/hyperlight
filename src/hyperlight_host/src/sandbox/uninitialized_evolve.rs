@@ -41,9 +41,11 @@ use crate::{MultiUseSandbox, Result, UninitializedSandbox, new_error};
 
 #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
 pub(super) fn evolve_impl_multi_use(u_sbox: UninitializedSandbox) -> Result<MultiUseSandbox> {
+    let t_evolve_total = std::time::Instant::now();
+
     let t0 = std::time::Instant::now();
     let (mut hshm, mut gshm) = u_sbox.mgr.build();
-    eprintln!("[TIMING] evolve: mgr.build(): {:?}", t0.elapsed());
+    crate::timing!("[TIMING] evolve: mgr.build(): {:?}", t0.elapsed());
 
     let t1 = std::time::Instant::now();
     let mut vm = set_up_hypervisor_partition(
@@ -53,7 +55,7 @@ pub(super) fn evolve_impl_multi_use(u_sbox: UninitializedSandbox) -> Result<Mult
         &u_sbox.rt_cfg,
         u_sbox.load_info,
     )?;
-    eprintln!("[TIMING] evolve: set_up_hypervisor_partition(): {:?}", t1.elapsed());
+    crate::timing!("[TIMING] evolve: set_up_hypervisor_partition(): {:?}", t1.elapsed());
 
     // Wire up HyperlightFS BEFORE vm.initialise() so the guest entrypoint
     // can read the manifest from the PEB during initialization
@@ -61,7 +63,7 @@ pub(super) fn evolve_impl_multi_use(u_sbox: UninitializedSandbox) -> Result<Mult
     if let Some(fs_image) = &u_sbox.hyperlight_fs {
         wire_hyperlight_fs(&mut vm, &gshm.layout, &mut hshm.shared_mem, fs_image)?;
     }
-    eprintln!("[TIMING] evolve: wire_hyperlight_fs(): {:?}", t2.elapsed());
+    crate::timing!("[TIMING] evolve: wire_hyperlight_fs(): {:?}", t2.elapsed());
 
     let seed = {
         let mut rng = rand::rng();
@@ -91,7 +93,9 @@ pub(super) fn evolve_impl_multi_use(u_sbox: UninitializedSandbox) -> Result<Mult
         #[cfg(gdb)]
         dbg_mem_access_hdl,
     )?;
-    eprintln!("[TIMING] evolve: vm.initialise(): {:?}", t3.elapsed());
+    crate::timing!("[TIMING] evolve: vm.initialise(): {:?}", t3.elapsed());
+
+    crate::timing!("[TIMING] evolve total: {:?}", t_evolve_total.elapsed());
 
     let dispatch_function_addr = hshm.get_pointer_to_dispatch_function()?;
     if dispatch_function_addr == 0 {

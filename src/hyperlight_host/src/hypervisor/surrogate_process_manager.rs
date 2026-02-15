@@ -63,15 +63,21 @@ pub(crate) const SURROGATE_PROCESS_BINARY_NAME: &str = "hyperlight_surrogate.exe
 /// (This is a factor of limitations in the `WHvMapGpaRange2` API which only allows 512 different process handles).
 const MAX_SURROGATE_PROCESSES: usize = 512;
 
+/// Default number of surrogate processes when `HYPERLIGHT_SURROGATE_COUNT` is
+/// not set. Using a small default avoids spawning hundreds of processes
+/// upfront, which can take several seconds. Callers that need more concurrent
+/// partitions can set the env var up to `MAX_SURROGATE_PROCESSES`.
+const DEFAULT_SURROGATE_PROCESSES: usize = 2;
+
 /// Returns the number of surrogate processes to create.
 /// Reads from the `HYPERLIGHT_SURROGATE_COUNT` environment variable if set,
-/// otherwise defaults to `MAX_SURROGATE_PROCESSES`.
+/// otherwise defaults to `DEFAULT_SURROGATE_PROCESSES`.
 fn number_of_surrogate_processes() -> usize {
     std::env::var("HYPERLIGHT_SURROGATE_COUNT")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .map(|n| n.min(MAX_SURROGATE_PROCESSES).max(1))
-        .unwrap_or(MAX_SURROGATE_PROCESSES)
+        .unwrap_or(DEFAULT_SURROGATE_PROCESSES)
 }
 
 /// `SurrogateProcessManager` manages hyperlight_surrogate processes. These

@@ -141,6 +141,27 @@ macro_rules! debug {
     }
 }
 
+/// Prints timing information to stderr when the `HYPERLIGHT_TIMING` environment
+/// variable is set (to any non-empty value). The result is cached so the env
+/// var is only read once per process.
+#[macro_export]
+macro_rules! timing {
+    ($($arg:tt)+) => {
+        {
+            use std::sync::OnceLock;
+            static ENABLED: OnceLock<bool> = OnceLock::new();
+            let enabled = ENABLED.get_or_init(|| {
+                std::env::var("HYPERLIGHT_TIMING")
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false)
+            });
+            if *enabled {
+                eprintln!($($arg)+);
+            }
+        }
+    }
+}
+
 // LOG_ONCE is used to log information about the crate version once
 #[cfg(feature = "build-metadata")]
 static LOG_ONCE: Once = Once::new();
