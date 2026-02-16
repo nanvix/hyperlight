@@ -275,9 +275,17 @@ impl VirtualMachine for WhpVm {
         let mut exit_intwin: u64 = 0;
         let mut timer_injects: u64 = 0;
         let mut timer_checks: u64 = 0;
+        // Port-specific IO exit counters (Hyperlight OutB protocol)
+        let mut io_log: u64 = 0;       // port 99
+        let mut io_call: u64 = 0;      // port 101
+        let mut io_abort: u64 = 0;     // port 102
+        let mut io_dbgprint: u64 = 0;  // port 103
+        let mut io_hwdev: u64 = 0;     // PIC/PIT ports (handled internally)
+        let mut loop_iter: u64 = 0;    // total loop iterations
         let t_run = std::time::Instant::now();
 
         loop {
+            loop_iter += 1;
             // --- Timer injection (hw-interrupts only) ---
             // Before each vCPU entry, check if a timer tick is due and the guest
             // can accept interrupts (IF=1), then inject via WHvRegisterPendingInterruption.
@@ -330,6 +338,24 @@ impl VirtualMachine for WhpVm {
                 self.cached_rflags = exit_context.VpContext.Rflags;
             }
 
+            // Log each exit within a run_vcpu call for profiling long-running calls.
+            let rip = exit_context.VpContext.Rip;
+            match exit_context.ExitReason {
+                WHvRunVpExitReasonX64InterruptWindow => {
+                    crate::timing!("[TIMING]     +{:?} iter={} intwin rip={:#x}", t_run.elapsed(), loop_iter, rip);
+                }
+                WHvRunVpExitReasonX64IoPortAccess => {
+                    let port = unsafe { exit_context.Anonymous.IoPortAccess.PortNumber };
+                    crate::timing!("[TIMING]     +{:?} iter={} io port={} rip={:#x}", t_run.elapsed(), loop_iter, port, rip);
+                }
+                WHvRunVpExitReasonX64Halt => {
+                    crate::timing!("[TIMING]     +{:?} iter={} halt rip={:#x}", t_run.elapsed(), loop_iter, rip);
+                }
+                _ => {
+                    crate::timing!("[TIMING]     +{:?} iter={} other reason={} rip={:#x}", t_run.elapsed(), loop_iter, exit_context.ExitReason.0, rip);
+                }
+            }
+
             let result = match exit_context.ExitReason {
                 // Interrupt window: the guest just enabled IF=1 after we
                 // requested a deliverability notification.  Inject the
@@ -376,7 +402,17 @@ impl VirtualMachine for WhpVm {
 
                         #[cfg(feature = "hw-interrupts")]
                         if self.handle_hw_io_out(port, data_val as u8) {
+                            io_hwdev += 1;
                             continue; // re-enter vCPU
+                        }
+
+                        // Classify Hyperlight OutB port
+                        match port {
+                            99 => io_log += 1,
+                            101 => io_call += 1,
+                            102 => io_abort += 1,
+                            103 => io_dbgprint += 1,
+                            _ => {}
                         }
 
                         VmExit::IoOut(
@@ -387,6 +423,7 @@ impl VirtualMachine for WhpVm {
                         // === IO IN ===
                         #[cfg(feature = "hw-interrupts")]
                         if let Some(val) = self.pic.handle_io_in(port) {
+                            io_hwdev += 1;
                             // Set RAX with response value, preserving upper bits
                             let mask = match access_size {
                                 1 => 0xFFu64,
@@ -480,8 +517,8 @@ impl VirtualMachine for WhpVm {
                 ))}
             };
             crate::timing!(
-                "[TIMING]   run_vcpu: {:?}, exits: io={} halt={} intwin={} mem={} other={}, timer: checks={} injects={}",
-                t_run.elapsed(), exit_io, exit_halt, exit_intwin, exit_mem, exit_other, timer_checks, timer_injects
+                "[TIMING]   run_vcpu: {:?}, exits: io={} halt={} intwin={} mem={} other={}, io_ports: log={} call={} dbgprint={} abort={} hwdev={}, timer: checks={} injects={}",
+                t_run.elapsed(), exit_io, exit_halt, exit_intwin, exit_mem, exit_other, io_log, io_call, io_dbgprint, io_abort, io_hwdev, timer_checks, timer_injects
             );
             return Ok(result);
         }
