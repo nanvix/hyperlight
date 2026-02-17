@@ -1824,70 +1824,348 @@ impl FatImage {
         Ok(self.fs.as_mut().unwrap())
     }
 
-    // Stub file I/O methods — not needed for mounting pre-built FATs,
-    // but exist for API compatibility.
+    /// List directory contents.
+    pub fn read_dir(&mut self, path: &str) -> Result<Vec<FatEntry>> {
+        Self::validate_path(path)?;
+        trace!(path, "Reading directory");
 
-    #[doc(hidden)]
-    pub fn read_dir(&mut self, _path: &str) -> Result<Vec<FatEntry>> {
-        Err(HyperlightError::Error(
-            "FAT file I/O is not supported on Windows".to_string(),
-        ))
+        let raw_entries = self.list_dir_entries(path)?;
+        let entries: Vec<FatEntry> = raw_entries
+            .into_iter()
+            .map(|(name, stat)| FatEntry { name, stat })
+            .collect();
+
+        trace!(path, count = entries.len(), "Directory read complete");
+        Ok(entries)
     }
 
-    #[doc(hidden)]
-    pub fn open_file(&mut self, _path: &str) -> Result<FatFileReader<'_>> {
-        Err(HyperlightError::Error(
-            "FAT file I/O is not supported on Windows".to_string(),
-        ))
+    /// Open a file for reading.
+    pub fn open_file(&mut self, path: &str) -> Result<FatFileReader<'_>> {
+        Self::validate_path(path)?;
+        trace!(path, "Opening file for reading");
+
+        let fs = self.get_fs()?;
+        let root = fs.root_dir();
+
+        let file = root.open_file(path).map_err(|e| {
+            error!(path, error = %e, "Failed to open file for reading");
+            HyperlightError::Error(format!("Failed to open file '{}': {}", path, e))
+        })?;
+
+        trace!(path, "File opened for reading");
+        Ok(FatFileReader {
+            file,
+            path: path.to_string(),
+        })
     }
 
-    #[doc(hidden)]
-    pub fn create_file(&mut self, _path: &str) -> Result<FatFileWriter<'_>> {
-        Err(HyperlightError::Error(
-            "FAT file I/O is not supported on Windows".to_string(),
-        ))
+    /// Create or truncate a file for writing.
+    pub fn create_file(&mut self, path: &str) -> Result<FatFileWriter<'_>> {
+        Self::validate_path(path)?;
+        trace!(path, "Creating file for writing");
+
+        let fs = self.get_fs()?;
+        let root = fs.root_dir();
+
+        let mut file = root.create_file(path).map_err(|e| {
+            error!(path, error = %e, "Failed to create file for writing");
+            HyperlightError::Error(format!("Failed to create file '{}': {}", path, e))
+        })?;
+
+        file.truncate().map_err(|e| {
+            error!(path, error = %e, "Failed to truncate file");
+            HyperlightError::Error(format!("Failed to truncate file '{}': {}", path, e))
+        })?;
+
+        trace!(path, "File created and truncated for writing");
+        Ok(FatFileWriter {
+            file,
+            path: path.to_string(),
+        })
     }
 
-    #[doc(hidden)]
-    pub fn create_dir(&mut self, _path: &str) -> Result<()> {
-        Err(HyperlightError::Error(
-            "FAT file I/O is not supported on Windows".to_string(),
-        ))
+    /// Create a directory.
+    pub fn create_dir(&mut self, path: &str) -> Result<()> {
+        Self::validate_path(path)?;
+        trace!(path, "Creating directory");
+
+        let fs = self.get_fs()?;
+        let root = fs.root_dir();
+
+        root.create_dir(path).map_err(|e| {
+            error!(path, error = %e, "Failed to create directory");
+            HyperlightError::Error(format!("Failed to create directory '{}': {}", path, e))
+        })?;
+
+        trace!(path, "Directory created");
+        Ok(())
     }
 
-    #[doc(hidden)]
-    pub fn delete_file(&mut self, _path: &str) -> Result<()> {
-        Err(HyperlightError::Error(
-            "FAT file I/O is not supported on Windows".to_string(),
-        ))
+    /// Delete a file.
+    pub fn delete_file(&mut self, path: &str) -> Result<()> {
+        Self::validate_path(path)?;
+        trace!(path, "Deleting file");
+
+        let fs = self.get_fs()?;
+        let root = fs.root_dir();
+
+        root.remove(path).map_err(|e| {
+            error!(path, error = %e, "Failed to delete file");
+            HyperlightError::Error(format!("Failed to delete file '{}': {}", path, e))
+        })?;
+
+        trace!(path, "File deleted");
+        Ok(())
     }
 
-    #[doc(hidden)]
-    pub fn delete_dir(&mut self, _path: &str) -> Result<()> {
-        Err(HyperlightError::Error(
-            "FAT file I/O is not supported on Windows".to_string(),
-        ))
+    /// Delete an empty directory.
+    pub fn delete_dir(&mut self, path: &str) -> Result<()> {
+        Self::validate_path(path)?;
+        trace!(path, "Deleting directory");
+
+        let fs = self.get_fs()?;
+        let root = fs.root_dir();
+
+        root.remove(path).map_err(|e| {
+            error!(path, error = %e, "Failed to delete directory");
+            HyperlightError::Error(format!("Failed to delete directory '{}': {}", path, e))
+        })?;
+
+        trace!(path, "Directory deleted");
+        Ok(())
     }
 
-    #[doc(hidden)]
-    pub fn rename(&mut self, _old_path: &str, _new_path: &str) -> Result<()> {
-        Err(HyperlightError::Error(
-            "FAT file I/O is not supported on Windows".to_string(),
-        ))
+    /// Rename a file or directory.
+    pub fn rename(&mut self, old_path: &str, new_path: &str) -> Result<()> {
+        Self::validate_path(old_path)?;
+        Self::validate_path(new_path)?;
+        trace!(old_path, new_path, "Renaming");
+
+        let old_rel = old_path.trim_start_matches('/');
+        let new_rel = new_path.trim_start_matches('/');
+
+        if old_rel.is_empty() || new_rel.is_empty() {
+            return Err(HyperlightError::Error(
+                "Cannot rename the root directory".to_string(),
+            ));
+        }
+
+        let fs = self.get_fs()?;
+        let root = fs.root_dir();
+
+        root.rename(old_rel, &root, new_rel).map_err(|e| {
+            error!(old_path, new_path, error = %e, "Failed to rename");
+            HyperlightError::Error(format!(
+                "Failed to rename '{}' to '{}': {}",
+                old_path, new_path, e
+            ))
+        })?;
+
+        trace!(old_path, new_path, "Renamed successfully");
+        Ok(())
     }
 
-    #[doc(hidden)]
-    pub fn stat(&mut self, _path: &str) -> Result<FatStat> {
-        Err(HyperlightError::Error(
-            "FAT file I/O is not supported on Windows".to_string(),
-        ))
+    /// Get metadata for a file or directory.
+    pub fn stat(&mut self, path: &str) -> Result<FatStat> {
+        Self::validate_path(path)?;
+        trace!(path, "Getting file stat");
+
+        if path == "/" {
+            return Ok(FatStat {
+                size: 0,
+                is_dir: true,
+                created: None,
+                modified: None,
+                accessed: None,
+            });
+        }
+
+        self.stat_entry(path)
     }
 
-    #[doc(hidden)]
-    pub fn exists(&mut self, _path: &str) -> Result<bool> {
-        Err(HyperlightError::Error(
-            "FAT file I/O is not supported on Windows".to_string(),
-        ))
+    /// Check if a path exists (file or directory).
+    pub fn exists(&mut self, path: &str) -> Result<bool> {
+        Self::validate_path(path)?;
+
+        if path == "/" {
+            return Ok(true);
+        }
+
+        let fs = self.get_fs()?;
+        let root = fs.root_dir();
+
+        let file_err = match root.open_file(path) {
+            Ok(_) => return Ok(true),
+            Err(fatfs::Error::NotFound) => None,
+            Err(e) => Some(e),
+        };
+
+        match root.open_dir(path) {
+            Ok(_) => Ok(true),
+            Err(fatfs::Error::NotFound) => Ok(false),
+            Err(dir_err) => {
+                if let Some(fe) = file_err {
+                    trace!(path, file_error = %fe, dir_error = %dir_err,
+                           "Both open_file and open_dir failed");
+                }
+                error!(path, error = %dir_err, "I/O error checking path existence");
+                let io_err: std::io::Error = dir_err.into();
+                Err(HyperlightError::IOError(io_err))
+            }
+        }
+    }
+
+    // ---- Private helpers ----
+
+    /// Validate that a path is absolute and doesn't contain "..".
+    fn validate_path(path: &str) -> Result<()> {
+        if !path.starts_with('/') {
+            error!(path, "Path must be absolute");
+            return Err(HyperlightError::Error(format!(
+                "Path must be absolute (start with '/'): '{}'",
+                path
+            )));
+        }
+
+        if path.contains("..") {
+            error!(path, "Path contains '..' which is not allowed");
+            return Err(HyperlightError::Error(format!(
+                "Path contains '..' which is not allowed: '{}'",
+                path
+            )));
+        }
+
+        if path.contains('\0') {
+            error!(path = %path.escape_default(), "Path contains null byte");
+            return Err(HyperlightError::Error(
+                "Path contains null byte which is not allowed".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Split a path into parent directory and filename.
+    fn split_path(path: &str) -> Result<(&str, &str)> {
+        if path == "/" {
+            return Ok(("/", ""));
+        }
+
+        let path = path.strip_suffix('/').unwrap_or(path);
+
+        if let Some(pos) = path.rfind('/') {
+            let parent = if pos == 0 { "/" } else { &path[..pos] };
+            let name = &path[pos + 1..];
+            Ok((parent, name))
+        } else {
+            Err(HyperlightError::Error(format!(
+                "Invalid path (no parent): '{}'",
+                path
+            )))
+        }
+    }
+
+    /// List directory contents, collecting into owned data.
+    fn list_dir_entries(&mut self, path: &str) -> Result<Vec<(String, FatStat)>> {
+        let fs = self.get_fs()?;
+        let root = fs.root_dir();
+
+        let dir = if path == "/" {
+            root
+        } else {
+            root.open_dir(path).map_err(|e| {
+                error!(path, error = %e, "Failed to open directory");
+                HyperlightError::Error(format!("Failed to open directory '{}': {}", path, e))
+            })?
+        };
+
+        let mut entries = Vec::new();
+        for entry in dir.iter() {
+            let entry = entry.map_err(|e| {
+                error!(path, error = %e, "Failed to read directory entry");
+                HyperlightError::Error(format!(
+                    "Failed to read directory entry in '{}': {}",
+                    path, e
+                ))
+            })?;
+
+            let name = entry.file_name();
+            if name == "." || name == ".." {
+                continue;
+            }
+
+            let stat = FatStat {
+                size: entry.len(),
+                is_dir: entry.is_dir(),
+                created: Self::datetime_to_chrono(entry.created()),
+                modified: Self::datetime_to_chrono(entry.modified()),
+                accessed: Self::date_to_chrono(entry.accessed()),
+            };
+            entries.push((name, stat));
+        }
+
+        Ok(entries)
+    }
+
+    /// Get stat for a specific path by looking it up in its parent directory.
+    fn stat_entry(&mut self, path: &str) -> Result<FatStat> {
+        let fs = self.get_fs()?;
+        let root = fs.root_dir();
+
+        let (parent_path, name) = Self::split_path(path)?;
+
+        let parent_dir = if parent_path == "/" {
+            root
+        } else {
+            root.open_dir(parent_path).map_err(|e| {
+                error!(parent_path, error = %e, "Failed to open parent directory for stat");
+                HyperlightError::Error(format!(
+                    "Failed to open parent directory '{}': {}",
+                    parent_path, e
+                ))
+            })?
+        };
+
+        for entry in parent_dir.iter() {
+            let entry = entry.map_err(|e| {
+                error!(path, error = %e, "Failed to read directory entry during stat");
+                HyperlightError::Error(format!("Failed to stat '{}': {}", path, e))
+            })?;
+
+            if entry.file_name() == name {
+                return Ok(FatStat {
+                    size: entry.len(),
+                    is_dir: entry.is_dir(),
+                    created: Self::datetime_to_chrono(entry.created()),
+                    modified: Self::datetime_to_chrono(entry.modified()),
+                    accessed: Self::date_to_chrono(entry.accessed()),
+                });
+            }
+        }
+
+        error!(path, "Path not found during stat");
+        Err(HyperlightError::Error(format!(
+            "Path not found: '{}'",
+            path
+        )))
+    }
+
+    /// Convert fatfs DateTime to chrono NaiveDateTime.
+    fn datetime_to_chrono(dt: fatfs::DateTime) -> Option<NaiveDateTime> {
+        chrono::NaiveDate::from_ymd_opt(
+            dt.date.year as i32,
+            dt.date.month as u32,
+            dt.date.day as u32,
+        )
+        .and_then(|date| {
+            date.and_hms_opt(dt.time.hour as u32, dt.time.min as u32, dt.time.sec as u32)
+        })
+    }
+
+    /// Convert fatfs Date to chrono NaiveDateTime.
+    fn date_to_chrono(d: fatfs::Date) -> Option<NaiveDateTime> {
+        chrono::NaiveDate::from_ymd_opt(d.year as i32, d.month as u32, d.day as u32)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
     }
 }
 
