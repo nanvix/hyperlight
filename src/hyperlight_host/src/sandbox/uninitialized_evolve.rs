@@ -192,13 +192,17 @@ fn wire_hyperlight_fs(
         )));
     }
 
-    // Allocate host memory for manifest and copy data into it
+    // Allocate host memory for manifest and copy data into it.
+    // NOTE: We use MAP_SHARED and keep PROT_WRITE because MSHV v4's
+    // pin_user_pages_fast requires write permission on host pages even
+    // when the guest mapping is read-only. Guest-side protection is
+    // enforced via MemoryRegionFlags::READ in the map_region call below.
     let manifest_host_ptr = unsafe {
         let ptr = libc::mmap(
             std::ptr::null_mut(),
             manifest_len_aligned,
             libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            libc::MAP_SHARED | libc::MAP_ANONYMOUS,
             -1,
             0,
         );
@@ -210,14 +214,6 @@ fn wire_hyperlight_fs(
         }
         // Copy manifest data
         std::ptr::copy_nonoverlapping(manifest_data.as_ptr(), ptr as *mut u8, manifest_len);
-        // Make read-only
-        if libc::mprotect(ptr, manifest_len_aligned, libc::PROT_READ) != 0 {
-            libc::munmap(ptr, manifest_len_aligned);
-            return Err(crate::HyperlightError::Error(format!(
-                "Failed to set manifest memory read-only: {:?}",
-                std::io::Error::last_os_error()
-            )));
-        }
         ptr
     };
 
@@ -326,14 +322,12 @@ fn map_file_cow_to_vm(
     use crate::mem::memory_region::{MemoryRegion, MemoryRegionType};
 
     unsafe {
-        // Determine host mmap protection based on guest flags
-        let mut prot = libc::PROT_READ;
-        if flags.contains(MemoryRegionFlags::WRITE) {
-            prot |= libc::PROT_WRITE;
-        }
-        if flags.contains(MemoryRegionFlags::EXECUTE) {
-            prot |= libc::PROT_EXEC;
-        }
+        // MSHV v4's pin_user_pages_fast requires PROT_WRITE on host pages
+        // even for read-only guest mappings, so we always include it here.
+        // We use MAP_PRIVATE so writes trigger CoW (copy-on-write) rather
+        // than modifying the backing file. Guest-side protection is enforced
+        // via the `flags` parameter in the map_region call below.
+        let prot = libc::PROT_READ | libc::PROT_WRITE;
 
         let file = std::fs::File::options().read(true).open(fp)?;
         let file_size = file.metadata()?.size();
