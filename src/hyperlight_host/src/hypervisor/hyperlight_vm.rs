@@ -811,12 +811,12 @@ impl HyperlightVm {
         #[cfg(feature = "mem_profile")]
         {
             let regs = self.vm.regs().map_err(|e| new_error!("{:?}", e))?;
-            handle_outb(mem_mgr, host_funcs, port, val, &regs, &mut self.trace_info).map_err(|e| new_error!("{:?}", e))?;
+            handle_outb(mem_mgr, host_funcs, port, val, &regs, &mut self.trace_info).map_err(outb_err_to_hyperlight)?;
         }
 
         #[cfg(not(feature = "mem_profile"))]
         {
-            handle_outb(mem_mgr, host_funcs, port, val).map_err(|e| new_error!("{:?}", e))?;
+            handle_outb(mem_mgr, host_funcs, port, val).map_err(outb_err_to_hyperlight)?;
         }
 
         Ok(())
@@ -1023,6 +1023,17 @@ impl HyperlightVm {
         } else {
             Ok(None)
         }
+    }
+}
+
+/// Convert a [`HandleOutbError`] to a [`HyperlightError`], preserving
+/// the [`GuestAborted`] variant so that callers can pattern-match on it.
+fn outb_err_to_hyperlight(e: HandleOutbError) -> HyperlightError {
+    match e {
+        HandleOutbError::GuestAborted { code, message } => {
+            HyperlightError::GuestAborted(code, message)
+        }
+        other => HyperlightError::Error(format!("{:?}", other)),
     }
 }
 
