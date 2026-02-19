@@ -201,6 +201,7 @@ pub(crate) fn handle_outb(
                 .map_err(|e| HandleOutbError::ReadHostFunctionCall(e.to_string()))?;
             let name = call.function_name.clone();
             let args: Vec<ParameterValue> = call.parameters.unwrap_or(vec![]);
+            crate::timing!("[TIMING]     CallFunction: {} args={:?}", name, args);
             let res = host_funcs
                 .try_lock()
                 .map_err(|e| HandleOutbError::LockFailed(file!(), line!(), e.to_string()))?

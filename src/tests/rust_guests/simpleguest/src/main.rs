@@ -43,6 +43,7 @@ use hyperlight_common::flatbuffer_wrappers::guest_log_level::LogLevel;
 use hyperlight_common::flatbuffer_wrappers::util::get_flatbuffer_result;
 use hyperlight_guest::error::{HyperlightGuestError, Result};
 use hyperlight_guest::exit::{abort_with_code, abort_with_code_and_message};
+use hyperlight_guest::{Read, Seek, SeekFrom, Write, fs};
 use hyperlight_guest_bin::exception::arch::{Context, ExceptionInfo};
 use hyperlight_guest_bin::guest_function::definition::GuestFunctionDefinition;
 use hyperlight_guest_bin::guest_function::register::register_function;
@@ -72,6 +73,364 @@ fn set_static() -> i32 {
         *val = 1;
     }
     bigarray.len() as i32
+}
+
+/// Reads a file from HyperlightFS and returns its contents.
+/// Returns empty vec if file not found or FS not initialized.
+#[guest_function("ReadFile")]
+fn read_file(path: String) -> Vec<u8> {
+    if !fs::is_initialized() {
+        return Vec::new();
+    }
+    match fs::open(&path) {
+        Ok(mut file) => file.read_to_vec().unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Returns 1 if HyperlightFS is initialized, 0 otherwise.
+#[guest_function("IsFsInitialized")]
+fn is_fs_initialized() -> i32 {
+    if fs::is_initialized() { 1 } else { 0 }
+}
+
+/// Randomly reads 10 chunks of 256 bytes from a file and returns them with their offsets.
+///
+/// Uses RDTSC-seeded LCG for random number generation (RDRAND not available in VM).
+///
+/// Arguments:
+/// - path: The file path to read from
+///
+/// Returns a Vec<u8> where each sample is:
+/// - 8 bytes: offset (little-endian u64)
+/// - 256 bytes: data read at that offset
+/// Total: 10 samples * 264 bytes = 2640 bytes
+///
+/// Returns empty vec if file not found or FS not initialized.
+#[guest_function("RandomReadChunks")]
+fn random_read_chunks(path: String) -> Vec<u8> {
+    const NUM_SAMPLES: usize = 10;
+    const CHUNK_SIZE: usize = 256;
+    const SAMPLE_SIZE: usize = 8 + CHUNK_SIZE; // offset + data
+
+    if !fs::is_initialized() {
+        return Vec::new();
+    }
+
+    let mut file = match fs::open(&path) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+
+    // Get file size from metadata
+    let file_size = match file.size() {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+
+    // Get timestamp counter for seeding RNG
+    fn rdtsc() -> u64 {
+        let lo: u32;
+        let hi: u32;
+        unsafe {
+            core::arch::asm!(
+                "rdtsc",
+                out("eax") lo,
+                out("edx") hi,
+                options(nostack, nomem)
+            );
+        }
+        ((hi as u64) << 32) | (lo as u64)
+    }
+
+    // Simple LCG random number generator
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            // LCG parameters from Numerical Recipes
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+            self.0
+        }
+    }
+
+    let mut rng = Lcg(rdtsc());
+
+    let mut result = vec![0u8; NUM_SAMPLES * SAMPLE_SIZE];
+
+    // Maximum valid offset (leaving room for CHUNK_SIZE bytes)
+    let max_offset = file_size.saturating_sub(CHUNK_SIZE as u64);
+
+    for i in 0..NUM_SAMPLES {
+        // Get random offset
+        let random_val = rng.next();
+        let offset = if max_offset > 0 {
+            random_val % max_offset
+        } else {
+            0
+        };
+
+        // Seek to offset
+        if file.seek(SeekFrom::Start(offset)).is_err() {
+            return Vec::new();
+        }
+
+        // Write offset to result (little-endian)
+        let sample_start = i * SAMPLE_SIZE;
+        result[sample_start..sample_start + 8].copy_from_slice(&offset.to_le_bytes());
+
+        // Read chunk data
+        let data_start = sample_start + 8;
+        if file
+            .read(&mut result[data_start..data_start + CHUNK_SIZE])
+            .is_err()
+        {
+            return Vec::new();
+        }
+    }
+
+    result
+}
+
+// ============================================================================
+// FAT Filesystem Test Functions
+// ============================================================================
+
+/// Writes content to a file on a FAT mount.
+/// Returns true on success, false on error.
+#[guest_function("WriteFatFile")]
+fn write_fat_file(path: String, content: Vec<u8>) -> bool {
+    if !fs::is_initialized() {
+        return false;
+    }
+
+    let file_result = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path);
+
+    match file_result {
+        Ok(mut file) => {
+            if file.write_all(&content).is_err() {
+                return false;
+            }
+            file.flush().is_ok()
+        }
+        Err(_) => false,
+    }
+}
+
+/// Reads a file from a FAT mount and returns its contents.
+/// Returns empty vec on error.
+#[guest_function("ReadFatFile")]
+fn read_fat_file(path: String) -> Vec<u8> {
+    if !fs::is_initialized() {
+        return Vec::new();
+    }
+    match fs::open(&path) {
+        Ok(mut file) => file.read_to_vec().unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Deletes a file from a FAT mount.
+/// Returns true on success, false on error.
+#[guest_function("DeleteFatFile")]
+fn delete_fat_file(path: String) -> bool {
+    if !fs::is_initialized() {
+        return false;
+    }
+    fs::unlink(&path).is_ok()
+}
+
+/// Creates a directory on a FAT mount.
+/// Returns true on success, false on error.
+#[guest_function("MkdirFat")]
+fn mkdir_fat(path: String) -> bool {
+    if !fs::is_initialized() {
+        return false;
+    }
+    fs::mkdir(&path).is_ok()
+}
+
+/// Removes an empty directory from a FAT mount.
+/// Returns true on success, false on error.
+#[guest_function("RmdirFat")]
+fn rmdir_fat(path: String) -> bool {
+    if !fs::is_initialized() {
+        return false;
+    }
+    fs::rmdir(&path).is_ok()
+}
+
+/// Lists directory contents on a FAT mount.
+/// Returns entry names as a newline-separated string.
+/// Returns empty string on error.
+#[guest_function("ListDirFat")]
+fn list_dir_fat(path: String) -> String {
+    if !fs::is_initialized() {
+        return String::new();
+    }
+    match fs::read_dir(&path) {
+        Ok(entries) => entries
+            .into_iter()
+            .map(|e| e.name)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Err(_) => String::new(),
+    }
+}
+
+/// Renames a file or directory on a FAT mount.
+/// Returns true on success, false on error.
+#[guest_function("RenameFat")]
+fn rename_fat(old_path: String, new_path: String) -> bool {
+    if !fs::is_initialized() {
+        return false;
+    }
+    fs::rename(&old_path, &new_path).is_ok()
+}
+
+/// Gets file size on FAT mount.
+/// Returns -1 on error, otherwise the file size.
+#[guest_function("StatFatSize")]
+fn stat_fat_size(path: String) -> i64 {
+    if !fs::is_initialized() {
+        return -1;
+    }
+    match fs::stat(&path) {
+        Ok(stat) => stat.size as i64,
+        Err(_) => -1,
+    }
+}
+
+/// Checks if a path exists on FAT mount.
+/// Returns 1 for file, 2 for directory, 0 for not found, -1 for error.
+#[guest_function("ExistsFat")]
+fn exists_fat(path: String) -> i32 {
+    if !fs::is_initialized() {
+        return -1;
+    }
+    match fs::stat(&path) {
+        Ok(stat) => {
+            if stat.is_dir {
+                2
+            } else {
+                1
+            }
+        }
+        Err(_) => 0,
+    }
+}
+
+/// Tests stat on a path and returns detailed result.
+/// Returns a string describing the result:
+/// - "ok:<size>" for existing files
+/// - "ok:dir" for existing directories  
+/// - "not_found" for NotFound error
+/// - "invalid_path" for InvalidPath error
+/// - "error:<description>" for other errors
+#[guest_function("StatPathResult")]
+fn stat_path_result(path: String) -> String {
+    use fs::FsError;
+    
+    if !fs::is_initialized() {
+        return "error:not_initialized".to_string();
+    }
+    match fs::stat(&path) {
+        Ok(stat) => {
+            if stat.is_dir {
+                "ok:dir".to_string()
+            } else {
+                format!("ok:{}", stat.size)
+            }
+        }
+        Err(FsError::NotFound) => "not_found".to_string(),
+        Err(FsError::InvalidPath) => "invalid_path".to_string(),
+        Err(e) => format!("error:{:?}", e),
+    }
+}
+
+/// Tests open on a path and returns detailed result.
+/// Returns a string describing the result:
+/// - "ok:<size>" for successful open (returns file size)
+/// - "not_found" for NotFound error
+/// - "invalid_path" for InvalidPath error
+/// - "error:<description>" for other errors
+#[guest_function("OpenPathResult")]
+fn open_path_result(path: String) -> String {
+    use fs::FsError;
+    
+    if !fs::is_initialized() {
+        return "error:not_initialized".to_string();
+    }
+    match fs::open(&path) {
+        Ok(mut file) => {
+            match file.size() {
+                Ok(size) => format!("ok:{}", size),
+                Err(e) => format!("error:size:{:?}", e),
+            }
+        }
+        Err(FsError::NotFound) => "not_found".to_string(),
+        Err(FsError::InvalidPath) => "invalid_path".to_string(),
+        Err(e) => format!("error:{:?}", e),
+    }
+}
+
+/// Gets the current working directory.
+/// Returns empty string on error.
+#[guest_function("GetCwd")]
+fn get_cwd() -> String {
+    if !fs::is_initialized() {
+        return String::new();
+    }
+    fs::cwd().unwrap_or_default()
+}
+
+/// Changes the current working directory.
+/// Returns true on success, false on error.
+#[guest_function("Chdir")]
+fn chdir(path: String) -> bool {
+    if !fs::is_initialized() {
+        return false;
+    }
+    fs::chdir(&path).is_ok()
+}
+
+// ============================================================================
+// Guest-Created FAT Mount Test Functions
+// ============================================================================
+
+/// Creates a guest-side FAT mount at the specified path.
+/// This allocates memory from the guest heap and formats it as FAT.
+/// Returns true on success, false on error.
+#[guest_function("CreateFatMount")]
+fn create_fat_mount(path: String, size: i64) -> bool {
+    if !fs::is_initialized() {
+        return false;
+    }
+    if size <= 0 {
+        return false;
+    }
+    fs::create_fat_mount(&path, size as usize).is_ok()
+}
+
+/// Unmounts a guest-created FAT mount.
+/// Returns true on success, false on error.
+/// Fails if the mount was host-provided (not guest-created).
+#[guest_function("UnmountFat")]
+fn unmount_fat(path: String) -> bool {
+    if !fs::is_initialized() {
+        return false;
+    }
+    fs::unmount(&path).is_ok()
+}
+
+/// Checks if a mount was created by the guest (not host-provided).
+/// Returns true if guest-created, false otherwise.
+#[guest_function("IsGuestCreatedMount")]
+fn is_guest_created_mount(path: String) -> bool {
+    fs::is_guest_created_mount(&path)
 }
 
 #[guest_function("EchoDouble")]

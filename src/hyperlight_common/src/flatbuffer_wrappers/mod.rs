@@ -28,4 +28,6 @@ pub mod guest_trace_data;
 pub mod host_function_definition;
 /// cbindgen:ignore
 pub mod host_function_details;
+/// cbindgen:ignore
+pub mod hyperlight_fs;
 pub mod util;

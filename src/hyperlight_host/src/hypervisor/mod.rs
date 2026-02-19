@@ -16,6 +16,10 @@ limitations under the License.
 
 use log::LevelFilter;
 
+/// Userspace PIC/PIT emulation for MSHV and WHP.
+#[cfg(feature = "hw-interrupts")]
+pub(crate) mod pic_pit;
+
 /// GDB debugging support
 #[cfg(gdb)]
 pub(crate) mod gdb;
@@ -525,14 +529,10 @@ pub(crate) mod tests {
         let rt_cfg: SandboxRuntimeConfig = Default::default();
         let sandbox =
             UninitializedSandbox::new(GuestBinary::FilePath(filename.clone()), Some(config))?;
-        let (mut mem_mgr, gshm) = sandbox.mgr.build().unwrap();
-        let exn_stack_top_gva = hyperlight_common::layout::MAX_GVA as u64
-            - hyperlight_common::layout::SCRATCH_TOP_EXN_STACK_OFFSET
-            + 1;
+        let (mut mem_mgr, mut gshm) = sandbox.mgr.build();
         let mut vm = set_up_hypervisor_partition(
-            gshm,
+            &mut gshm,
             &config,
-            exn_stack_top_gva,
             #[cfg(any(crashdump, gdb))]
             &rt_cfg,
             sandbox.load_info,

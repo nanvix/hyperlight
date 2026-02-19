@@ -17,6 +17,8 @@ limitations under the License.
 #[cfg(gdb)]
 use std::fmt::Debug;
 use std::sync::LazyLock;
+#[cfg(feature = "hw-interrupts")]
+use std::time::Instant;
 
 #[cfg(gdb)]
 use mshv_bindings::{DebugRegisters, hv_message_type_HVMSG_X64_EXCEPTION_INTERCEPT};
@@ -27,6 +29,10 @@ use mshv_bindings::{
     hv_partition_property_code_HV_PARTITION_PROPERTY_SYNTHETIC_PROC_FEATURES,
     hv_partition_synthetic_processor_features, hv_register_assoc,
     hv_register_name_HV_X64_REGISTER_RIP, hv_register_value, mshv_user_mem_region,
+};
+#[cfg(feature = "hw-interrupts")]
+use mshv_bindings::{
+    hv_register_name_HV_REGISTER_PENDING_INTERRUPTION, hv_register_name_HV_X64_REGISTER_RAX,
 };
 use mshv_ioctls::{Mshv, VcpuFd, VmFd};
 use tracing::{Span, instrument};
@@ -39,6 +45,8 @@ use crate::hypervisor::regs::{
     CommonDebugRegs, CommonFpu, CommonRegisters, CommonSpecialRegisters, FP_CONTROL_WORD_DEFAULT,
     MXCSR_DEFAULT,
 };
+#[cfg(feature = "hw-interrupts")]
+use crate::hypervisor::pic_pit::{Pic, Pit};
 #[cfg(all(test, feature = "init-paging"))]
 use crate::hypervisor::virtual_machine::XSAVE_BUFFER_SIZE;
 use crate::hypervisor::virtual_machine::{
@@ -67,6 +75,12 @@ pub(crate) fn is_hypervisor_present() -> bool {
 pub(crate) struct MshvVm {
     vm_fd: VmFd,
     vcpu_fd: VcpuFd,
+    #[cfg(feature = "hw-interrupts")]
+    pic: Pic,
+    #[cfg(feature = "hw-interrupts")]
+    pit: Pit,
+    #[cfg(feature = "hw-interrupts")]
+    last_tick: Instant,
 }
 
 static MSHV: LazyLock<std::result::Result<Mshv, CreateVmError>> =
@@ -103,7 +117,16 @@ impl MshvVm {
                 .map_err(|e| CreateVmError::CreateVcpuFd(e.into()))?
         };
 
-        Ok(Self { vm_fd, vcpu_fd })
+        Ok(Self {
+            vm_fd,
+            vcpu_fd,
+            #[cfg(feature = "hw-interrupts")]
+            pic: Pic::new(),
+            #[cfg(feature = "hw-interrupts")]
+            pit: Pit::new(),
+            #[cfg(feature = "hw-interrupts")]
+            last_tick: Instant::now(),
+        })
     }
 }
 
@@ -140,86 +163,187 @@ impl VirtualMachine for MshvVm {
         #[cfg(gdb)]
         const EXCEPTION_INTERCEPT: hv_message_type = hv_message_type_HVMSG_X64_EXCEPTION_INTERCEPT;
 
-        // setup_trace_guest must be called right before vcpu_run.run() call, because
-        // it sets the guest span, no other traces or spans must be setup in between these calls.
-        #[cfg(feature = "trace_guest")]
-        tc.setup_guest_trace(Span::current().context());
-        let exit_reason = self.vcpu_fd.run();
-
-        let result = match exit_reason {
-            Ok(m) => match m.header.message_type {
-                HALT_MESSAGE => VmExit::Halt(),
-                IO_PORT_INTERCEPT_MESSAGE => {
-                    let io_message = m
-                        .to_ioport_info()
-                        .map_err(|_| RunVcpuError::DecodeIOMessage(m.header.message_type))?;
-                    let port_number = io_message.port_number;
-                    let rip = io_message.header.rip;
-                    let rax = io_message.rax;
-                    let instruction_length = io_message.header.instruction_length() as u64;
-
-                    // mshv, unlike kvm, does not automatically increment RIP
+        loop {
+            // --- Timer injection (hw-interrupts only) ---
+            // Before each vCPU entry, check if a timer tick is due and inject
+            // an interrupt via HV_REGISTER_PENDING_INTERRUPTION.
+            #[cfg(feature = "hw-interrupts")]
+            if let Some(period) = self.pit.period() {
+                let elapsed = self.last_tick.elapsed();
+                if elapsed >= period {
+                    self.last_tick = Instant::now();
+                    let vector = self.pic.master_vector_base() as u64;
+                    // Format: bit 31 = valid, bits 10:8 = type (0 = external), bits 7:0 = vector
+                    let pending = vector | (1u64 << 31);
                     self.vcpu_fd
                         .set_reg(&[hv_register_assoc {
-                            name: hv_register_name_HV_X64_REGISTER_RIP,
-                            value: hv_register_value {
-                                reg64: rip + instruction_length,
-                            },
+                            name: hv_register_name_HV_REGISTER_PENDING_INTERRUPTION,
+                            value: hv_register_value { reg64: pending },
                             ..Default::default()
                         }])
-                        .map_err(|e| RunVcpuError::IncrementRip(e.into()))?;
-                    VmExit::IoOut(port_number, rax.to_le_bytes().to_vec())
+                        .map_err(|e| RunVcpuError::Unknown(e.into()))?;
                 }
-                UNMAPPED_GPA_MESSAGE => {
-                    let mimo_message = m
-                        .to_memory_info()
-                        .map_err(|_| RunVcpuError::DecodeIOMessage(m.header.message_type))?;
-                    let addr = mimo_message.guest_physical_address;
-                    match MemoryRegionFlags::try_from(mimo_message)
-                        .map_err(|_| RunVcpuError::ParseGpaAccessInfo)?
-                    {
-                        MemoryRegionFlags::READ => VmExit::MmioRead(addr),
-                        MemoryRegionFlags::WRITE => VmExit::MmioWrite(addr),
-                        _ => VmExit::Unknown("Unknown MMIO access".to_string()),
+            }
+
+            // setup_trace_guest must be called right before vcpu_run.run() call, because
+            // it sets the guest span, no other traces or spans must be setup in between these calls.
+            #[cfg(feature = "trace_guest")]
+            tc.setup_guest_trace(Span::current().context());
+            let exit_reason = self.vcpu_fd.run();
+
+            let result = match exit_reason {
+                Ok(m) => match m.header.message_type {
+                    HALT_MESSAGE => {
+                        // When hw-interrupts are enabled and the PIT is configured,
+                        // HLT means "wait for the next interrupt". Sleep until the
+                        // next timer tick, inject the interrupt, and re-enter.
+                        #[cfg(feature = "hw-interrupts")]
+                        if let Some(period) = self.pit.period() {
+                            let elapsed = self.last_tick.elapsed();
+                            if elapsed < period {
+                                std::thread::sleep(period - elapsed);
+                            }
+                            self.last_tick = Instant::now();
+                            let vector = self.pic.master_vector_base() as u64;
+                            let pending = vector | (1u64 << 31);
+                            self.vcpu_fd
+                                .set_reg(&[hv_register_assoc {
+                                    name: hv_register_name_HV_REGISTER_PENDING_INTERRUPTION,
+                                    value: hv_register_value { reg64: pending },
+                                    ..Default::default()
+                                }])
+                                .map_err(|e| RunVcpuError::Unknown(e.into()))?;
+                            continue; // re-enter vCPU
+                        }
+                        return Ok(VmExit::Halt());
                     }
-                }
-                INVALID_GPA_ACCESS_MESSAGE => {
-                    let mimo_message = m
-                        .to_memory_info()
-                        .map_err(|_| RunVcpuError::DecodeIOMessage(m.header.message_type))?;
-                    let gpa = mimo_message.guest_physical_address;
-                    let access_info = MemoryRegionFlags::try_from(mimo_message)
-                        .map_err(|_| RunVcpuError::ParseGpaAccessInfo)?;
-                    match access_info {
-                        MemoryRegionFlags::READ => VmExit::MmioRead(gpa),
-                        MemoryRegionFlags::WRITE => VmExit::MmioWrite(gpa),
-                        _ => VmExit::Unknown("Unknown MMIO access".to_string()),
+                    IO_PORT_INTERCEPT_MESSAGE => {
+                        let io_message = m
+                            .to_ioport_info()
+                            .map_err(|_| RunVcpuError::DecodeIOMessage(m.header.message_type))?;
+                        let port = io_message.port_number;
+                        let rip = io_message.header.rip;
+                        let rax = io_message.rax;
+                        let instruction_length =
+                            io_message.header.instruction_length() as u64;
+
+                        // Extract access_size from the access_info bitfield (lower 3 bits)
+                        let access_size =
+                            (unsafe { io_message.access_info.as_uint8 } & 0x07) as usize;
+
+                        // Distinguish IO IN (read, type=0) from IO OUT (write, type=1)
+                        let is_io_in = io_message.header.intercept_access_type == 0;
+
+                        // mshv, unlike kvm, does not automatically increment RIP
+                        self.vcpu_fd
+                            .set_reg(&[hv_register_assoc {
+                                name: hv_register_name_HV_X64_REGISTER_RIP,
+                                value: hv_register_value {
+                                    reg64: rip + instruction_length,
+                                },
+                                ..Default::default()
+                            }])
+                            .map_err(|e| RunVcpuError::IncrementRip(e.into()))?;
+
+                        if is_io_in {
+                            // === IO IN ===
+                            #[cfg(feature = "hw-interrupts")]
+                            if let Some(val) = self.pic.handle_io_in(port) {
+                                // Set RAX with response value, preserving upper bits
+                                let mask = match access_size {
+                                    1 => 0xFFu64,
+                                    2 => 0xFFFFu64,
+                                    4 => 0xFFFF_FFFFu64,
+                                    _ => u64::MAX,
+                                };
+                                let new_rax = (rax & !mask) | (val as u64 & mask);
+                                self.vcpu_fd
+                                    .set_reg(&[hv_register_assoc {
+                                        name: hv_register_name_HV_X64_REGISTER_RAX,
+                                        value: hv_register_value { reg64: new_rax },
+                                        ..Default::default()
+                                    }])
+                                    .map_err(|e| RunVcpuError::Unknown(e.into()))?;
+                                continue; // re-enter vCPU
+                            }
+                            return Ok(VmExit::IoIn(port, access_size as u8));
+                        } else {
+                            // === IO OUT ===
+                            // Mask rax by access_size
+                            let mask = match access_size {
+                                1 => 0xFFu64,
+                                2 => 0xFFFFu64,
+                                4 => 0xFFFF_FFFFu64,
+                                _ => u64::MAX,
+                            };
+                            let data_val = rax & mask;
+
+                            #[cfg(feature = "hw-interrupts")]
+                            if self.handle_hw_io_out(port, data_val as u8) {
+                                continue; // re-enter vCPU
+                            }
+
+                            return Ok(VmExit::IoOut(
+                                port,
+                                data_val.to_le_bytes()[..access_size.max(1)].to_vec(),
+                            ));
+                        }
                     }
-                }
-                #[cfg(gdb)]
-                EXCEPTION_INTERCEPT => {
-                    let ex_info = m
-                        .to_exception_info()
-                        .map_err(|_| RunVcpuError::DecodeIOMessage(m.header.message_type))?;
-                    let DebugRegisters { dr6, .. } = self
-                        .vcpu_fd
-                        .get_debug_regs()
-                        .map_err(|e| RunVcpuError::GetDr6(e.into()))?;
-                    VmExit::Debug {
-                        dr6,
-                        exception: ex_info.exception_vector as u32,
+                    UNMAPPED_GPA_MESSAGE => {
+                        let mimo_message = m
+                            .to_memory_info()
+                            .map_err(|_| RunVcpuError::DecodeIOMessage(m.header.message_type))?;
+                        let addr = mimo_message.guest_physical_address;
+                        return match MemoryRegionFlags::try_from(mimo_message)
+                            .map_err(|_| RunVcpuError::ParseGpaAccessInfo)?
+                        {
+                            MemoryRegionFlags::READ => Ok(VmExit::MmioRead(addr)),
+                            MemoryRegionFlags::WRITE => Ok(VmExit::MmioWrite(addr)),
+                            _ => Ok(VmExit::Unknown("Unknown MMIO access".to_string())),
+                        };
                     }
-                }
-                other => VmExit::Unknown(format!("Unknown MSHV VCPU exit: {:?}", other)),
-            },
-            Err(e) => match e.errno() {
-                // InterruptHandle::kill() sends a signal (SIGRTMIN+offset) to interrupt the vcpu, which causes EINTR
-                libc::EINTR => VmExit::Cancelled(),
-                libc::EAGAIN => VmExit::Retry(),
-                _ => Err(RunVcpuError::Unknown(e.into()))?,
-            },
-        };
-        Ok(result)
+                    INVALID_GPA_ACCESS_MESSAGE => {
+                        let mimo_message = m
+                            .to_memory_info()
+                            .map_err(|_| RunVcpuError::DecodeIOMessage(m.header.message_type))?;
+                        let gpa = mimo_message.guest_physical_address;
+                        let access_info = MemoryRegionFlags::try_from(mimo_message)
+                            .map_err(|_| RunVcpuError::ParseGpaAccessInfo)?;
+                        return match access_info {
+                            MemoryRegionFlags::READ => Ok(VmExit::MmioRead(gpa)),
+                            MemoryRegionFlags::WRITE => Ok(VmExit::MmioWrite(gpa)),
+                            _ => Ok(VmExit::Unknown("Unknown MMIO access".to_string())),
+                        };
+                    }
+                    #[cfg(gdb)]
+                    EXCEPTION_INTERCEPT => {
+                        let ex_info = m
+                            .to_exception_info()
+                            .map_err(|_| RunVcpuError::DecodeIOMessage(m.header.message_type))?;
+                        let DebugRegisters { dr6, .. } = self
+                            .vcpu_fd
+                            .get_debug_regs()
+                            .map_err(|e| RunVcpuError::GetDr6(e.into()))?;
+                        return Ok(VmExit::Debug {
+                            dr6,
+                            exception: ex_info.exception_vector as u32,
+                        });
+                    }
+                    other => {
+                        return Ok(VmExit::Unknown(format!(
+                            "Unknown MSHV VCPU exit: {:?}",
+                            other
+                        )))
+                    }
+                },
+                Err(e) => match e.errno() {
+                    // InterruptHandle::kill() sends a signal (SIGRTMIN+offset) to interrupt the vcpu, which causes EINTR
+                    libc::EINTR => return Ok(VmExit::Cancelled()),
+                    libc::EAGAIN => continue,
+                    _ => Err(RunVcpuError::Unknown(e.into()))?,
+                },
+            };
+        }
     }
 
     fn regs(&self) -> std::result::Result<CommonRegisters, RegisterError> {
@@ -356,6 +480,43 @@ impl VirtualMachine for MshvVm {
     }
 }
 
+#[cfg(feature = "hw-interrupts")]
+impl MshvVm {
+    /// Handle an IO OUT to a hardware emulation port (PIC, PIT, speaker, IO wait).
+    /// Returns true if the port was handled internally.
+    fn handle_hw_io_out(&mut self, port: u16, val: u8) -> bool {
+        // PIC ports
+        if self.pic.handle_io_out(port, val) {
+            return true;
+        }
+
+        // PIT command register
+        if port == 0x43 {
+            self.pit.handle_command(val);
+            return true;
+        }
+
+        // PIT channel 0 data
+        if port == 0x40 {
+            self.pit.handle_data(val);
+            return true;
+        }
+
+        // Speaker port (0x61) -- silently ignore
+        // Equivalent to KVM's KVM_PIT_SPEAKER_DUMMY
+        if port == 0x61 {
+            return true;
+        }
+
+        // IO wait port (0x80) -- silently ignore (timing delay)
+        if port == 0x80 {
+            return true;
+        }
+
+        false
+    }
+}
+
 #[cfg(gdb)]
 impl DebuggableVm for MshvVm {
     fn translate_gva(&self, gva: u64) -> std::result::Result<u64, DebugError> {
@@ -423,7 +584,7 @@ impl DebuggableVm for MshvVm {
             return Ok(());
         }
 
-        // Find the first available LOCAL (L0–L3) slot
+        // Find the first available LOCAL (L0-L3) slot
         let i = (0..MAX_NO_OF_HW_BP)
             .position(|i| regs.dr7 & (1 << (i * 2)) == 0)
             .ok_or(DebugError::TooManyHwBreakpoints(MAX_NO_OF_HW_BP))?;

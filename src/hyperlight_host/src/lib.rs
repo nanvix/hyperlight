@@ -54,6 +54,8 @@ pub(crate) mod built_info {
 pub mod error;
 /// Wrappers for host and guest functions.
 pub mod func;
+/// Zero-copy filesystem passthrough for mapping host files into guests.
+pub mod hyperlight_fs;
 /// Wrappers for hypervisor implementations
 pub mod hypervisor;
 /// Functionality to establish and manage an individual sandbox's
@@ -136,6 +138,27 @@ macro_rules! debug {
         #[cfg(print_debug)]
         println!($($arg)+);
         log::debug!($($arg)+);
+    }
+}
+
+/// Prints timing information to stderr when the `HYPERLIGHT_TIMING` environment
+/// variable is set (to any non-empty value). The result is cached so the env
+/// var is only read once per process.
+#[macro_export]
+macro_rules! timing {
+    ($($arg:tt)+) => {
+        {
+            use std::sync::OnceLock;
+            static ENABLED: OnceLock<bool> = OnceLock::new();
+            let enabled = ENABLED.get_or_init(|| {
+                std::env::var("HYPERLIGHT_TIMING")
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false)
+            });
+            if *enabled {
+                eprintln!($($arg)+);
+            }
+        }
     }
 }
 

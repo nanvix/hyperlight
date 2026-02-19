@@ -108,6 +108,37 @@ pub fn c_simple_guest_as_string() -> Result<String> {
         .ok_or_else(|| anyhow!("couldn't convert simple guest PathBuf to string"))
 }
 
+/// Get a fully qualified path to the simpleguest binary based on the `GUEST` env var.
+///
+/// This function selects between Rust and C guest binaries based on environment:
+/// - `GUEST=rust` (default): Returns the Rust simpleguest binary path
+/// - `GUEST=c`: Returns the C simpleguest binary path
+///
+/// # Panics
+///
+/// Panics if:
+/// - The GUEST env var contains an unknown value (not "rust" or "c")
+/// - The selected guest binary path cannot be resolved
+///
+/// # Example
+///
+/// ```ignore
+/// // Run with Rust guest (default)
+/// let path = simple_guest_by_env();
+///
+/// // Run with C guest
+/// std::env::set_var("GUEST", "c");
+/// let path = simple_guest_by_env();
+/// ```
+pub fn simple_guest_by_env() -> String {
+    let guest_type = std::env::var("GUEST").unwrap_or_else(|_| "rust".to_string());
+    match guest_type.as_str() {
+        "rust" => simple_guest_as_string().expect("Rust guest binary not found"),
+        "c" => c_simple_guest_as_string().expect("C guest binary not found"),
+        _ => panic!("Unknown guest type '{guest_type}', use either 'rust' or 'c'"),
+    }
+}
+
 /// Get a fully qualified path to a simple guest binary preferring a binary
 /// in the same directory as the parent executable. This will be used in
 /// fuzzing scenarios where pre-built binaries will be built and submitted to

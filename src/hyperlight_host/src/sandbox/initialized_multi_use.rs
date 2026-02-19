@@ -28,6 +28,7 @@ use hyperlight_common::flatbuffer_wrappers::function_call::{FunctionCall, Functi
 use hyperlight_common::flatbuffer_wrappers::function_types::{
     ParameterValue, ReturnType, ReturnValue,
 };
+use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
 use hyperlight_common::flatbuffer_wrappers::util::estimate_flatbuffer_capacity;
 use tracing::{Span, instrument};
 
@@ -37,10 +38,10 @@ use super::snapshot::Snapshot;
 use crate::HyperlightError::{self, SnapshotSandboxMismatch};
 use crate::func::{ParameterTuple, SupportedReturnType};
 use crate::hypervisor::InterruptHandle;
-use crate::hypervisor::hyperlight_vm::{HyperlightVm, HyperlightVmError};
-use crate::mem::memory_region::MemoryRegion;
+use crate::hypervisor::hyperlight_vm::HyperlightVm;
 #[cfg(unix)]
-use crate::mem::memory_region::{MemoryRegionFlags, MemoryRegionType};
+use crate::mem::memory_region::MemoryRegionType;
+use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
 use crate::mem::mgr::SandboxMemoryManager;
 use crate::mem::ptr::RawPtr;
 use crate::mem::shared_mem::HostSharedMemory;
@@ -101,6 +102,14 @@ pub struct MultiUseSandbox {
     /// If the current state of the sandbox has been captured in a snapshot,
     /// that snapshot is stored here.
     snapshot: Option<Arc<Snapshot>>,
+    /// HyperlightFS image containing FAT mounts.
+    /// This must be kept alive for the lifetime of the sandbox because:
+    /// 1. FAT images are mmap'd and registered with KVM as memory regions
+    /// 2. Dropping this would munmap the memory while KVM still references it
+    ///
+    /// Note: This field also provides access to FAT mounts for the host extraction APIs
+    /// (fs_stat, fs_read_file, fs_read_dir, fs_write_file).
+    hyperlight_fs: Option<crate::hyperlight_fs::HyperlightFSImage>,
 }
 
 impl MultiUseSandbox {
@@ -116,6 +125,7 @@ impl MultiUseSandbox {
         vm: HyperlightVm,
         dispatch_ptr: RawPtr,
         #[cfg(gdb)] dbg_mem_access_fn: Arc<Mutex<SandboxMemoryManager<HostSharedMemory>>>,
+        hyperlight_fs: Option<crate::hyperlight_fs::HyperlightFSImage>,
     ) -> MultiUseSandbox {
         Self {
             id: super::snapshot::SANDBOX_CONFIGURATION_COUNTER.fetch_add(1, Ordering::Relaxed),
@@ -127,6 +137,7 @@ impl MultiUseSandbox {
             #[cfg(gdb)]
             dbg_mem_access_fn,
             snapshot: None,
+            hyperlight_fs,
         }
     }
 
@@ -169,22 +180,7 @@ impl MultiUseSandbox {
         }
         let mapped_regions_iter = self.vm.get_mapped_regions();
         let mapped_regions_vec: Vec<MemoryRegion> = mapped_regions_iter.cloned().collect();
-        let root_pt_gpa = self
-            .vm
-            .get_root_pt()
-            .map_err(|e| HyperlightError::HyperlightVmError(e.into()))?;
-        let stack_top_gpa = self.vm.get_stack_top();
-        let sregs = self
-            .vm
-            .get_snapshot_sregs()
-            .map_err(|e| HyperlightError::HyperlightVmError(e.into()))?;
-        let memory_snapshot = self.mem_mgr.snapshot(
-            self.id,
-            mapped_regions_vec,
-            root_pt_gpa,
-            stack_top_gpa,
-            sregs,
-        )?;
+        let memory_snapshot = self.mem_mgr.snapshot(self.id, mapped_regions_vec)?;
         let snapshot = Arc::new(memory_snapshot);
         self.snapshot = Some(snapshot.clone());
         Ok(snapshot)
@@ -210,6 +206,7 @@ impl MultiUseSandbox {
     /// - **Corrupted allocator metadata** - Free lists and heap headers restored to consistent state
     /// - **Locked mutexes** - All lock state is reset
     /// - **Partial updates** - Data structures restored to their pre-execution state
+    ///
     ///
     /// # Examples
     ///
@@ -267,58 +264,18 @@ impl MultiUseSandbox {
     /// ```
     #[instrument(err(Debug), skip_all, parent = Span::current())]
     pub fn restore(&mut self, snapshot: Arc<Snapshot>) -> Result<()> {
-        // Currently, we do not try to optimise restore to the
-        // most-current snapshot. This is because the most-current
-        // snapshot, while it must have identical virtual memory
-        // layout to the current sandbox, does not necessarily have
-        // the exact same /physical/ memory contents. It is not
-        // entirely inconceivable that this could lead to breakage of
-        // cross-request isolation in some way, although it would
-        // require some /very/ odd code.  For example, suppose that a
-        // service uses Hyperlight to sandbox native code from
-        // clients, and promises cross-request isolation. A tenant
-        // provides a binary that can process two forms of request,
-        // either writing a secret into physical memory, or reading
-        // from arbitrary physical memory, assuming that the two kinds
-        // of requests can never (dangerously) meet in the same
-        // sandbox.
-        //
-        // It is presently unclear whether this is a sensible threat
-        // model, especially since Hyperlight is often used with
-        // managed-code runtimes which do not allow even arbitrary
-        // access to virtual memory, much less physical memory.
-        // However, out of an abundance of caution, the optimisation
-        // is presently disabled.
+        if let Some(snap) = &self.snapshot
+            && snap.as_ref() == snapshot.as_ref()
+        {
+            // If the snapshot is already the current one, no need to restore
+            return Ok(());
+        }
 
         if self.id != snapshot.sandbox_id() {
             return Err(SnapshotSandboxMismatch);
         }
 
-        let (gsnapshot, gscratch) = self.mem_mgr.restore_snapshot(&snapshot)?;
-        if let Some(gsnapshot) = gsnapshot {
-            self.vm
-                .update_snapshot_mapping(gsnapshot)
-                .map_err(|e| HyperlightError::HyperlightVmError(e.into()))?;
-        }
-        if let Some(gscratch) = gscratch {
-            self.vm
-                .update_scratch_mapping(gscratch)
-                .map_err(|e| HyperlightError::HyperlightVmError(e.into()))?;
-        }
-
-        let sregs = snapshot.sregs().ok_or_else(|| {
-            HyperlightError::Error("snapshot from running sandbox should have sregs".to_string())
-        })?;
-        // TODO (ludfjig): Go through the rest of possible errors in this `MultiUseSandbox::restore` function
-        // and determine if they should also poison the sandbox.
-        self.vm
-            .reset_vcpu(snapshot.root_pt_gpa(), sregs)
-            .map_err(|e| {
-                self.poisoned = true;
-                HyperlightVmError::Restore(e)
-            })?;
-
-        self.vm.set_stack_top(snapshot.stack_top_gva());
+        self.mem_mgr.restore_snapshot(&snapshot)?;
 
         let current_regions: HashSet<_> = self.vm.get_mapped_regions().cloned().collect();
         let snapshot_regions: HashSet<_> = snapshot.regions().iter().cloned().collect();
@@ -327,15 +284,13 @@ impl MultiUseSandbox {
         let regions_to_map = snapshot_regions.difference(&current_regions);
 
         for region in regions_to_unmap {
-            self.vm
-                .unmap_region(region)
-                .map_err(HyperlightVmError::UnmapRegion)?;
+            self.vm.unmap_region(region)?;
         }
 
         for region in regions_to_map {
             // Safety: The region has been mapped before, and at that point the caller promised that the memory region is valid
             // in their call to `MultiUseSandbox::map_region`
-            unsafe { self.vm.map_region(region) }.map_err(HyperlightVmError::MapRegion)?;
+            unsafe { self.vm.map_region(region)? };
         }
 
         // The restored snapshot is now our most current snapshot
@@ -528,7 +483,7 @@ impl MultiUseSandbox {
     /// for the lifetime of `self`.
     #[instrument(err(Debug), skip(self, rgn), parent = Span::current())]
     #[cfg(target_os = "linux")]
-    unsafe fn map_region(&mut self, rgn: &MemoryRegion) -> Result<()> {
+    pub(crate) unsafe fn map_region(&mut self, rgn: &MemoryRegion) -> Result<()> {
         if self.poisoned {
             return Err(crate::HyperlightError::PoisonedSandbox);
         }
@@ -545,21 +500,36 @@ impl MultiUseSandbox {
         }
         // Reset snapshot since we are mutating the sandbox state
         self.snapshot = None;
-        unsafe { self.vm.map_region(rgn) }.map_err(HyperlightVmError::MapRegion)?;
+        unsafe { self.vm.map_region(rgn) }?;
         self.mem_mgr.mapped_rgns += 1;
         Ok(())
     }
 
-    /// Map the contents of a file into the guest at a particular address
+    /// Map the contents of a file into the guest at a particular address.
     ///
-    /// Returns the length of the mapping in bytes.
+    /// The file is memory-mapped with copy-on-write semantics and made visible
+    /// to the guest at the specified address with the given permission flags.
+    ///
+    /// Returns the length of the mapping in bytes (page-aligned).
+    ///
+    /// # Arguments
+    ///
+    /// * `fp` - Path to the file to map
+    /// * `guest_base` - Guest address where the file should be mapped
+    /// * `flags` - Memory permission flags for the guest mapping
     ///
     /// ## Poisoned Sandbox
     ///
     /// This method will return [`crate::HyperlightError::PoisonedSandbox`] if the sandbox
     /// is currently poisoned. Use [`restore()`](Self::restore) to recover from a poisoned state.
-    #[instrument(err(Debug), skip(self, _fp, _guest_base), parent = Span::current())]
-    pub fn map_file_cow(&mut self, _fp: &Path, _guest_base: u64) -> Result<u64> {
+    #[cfg_attr(windows, allow(unused_variables))]
+    #[instrument(err(Debug), skip(self, fp, guest_base, flags), parent = Span::current())]
+    pub fn map_file_cow(
+        &mut self,
+        fp: &Path,
+        guest_base: u64,
+        flags: MemoryRegionFlags,
+    ) -> Result<u64> {
         if self.poisoned {
             return Err(crate::HyperlightError::PoisonedSandbox);
         }
@@ -567,14 +537,23 @@ impl MultiUseSandbox {
         log_then_return!("mmap'ing a file into the guest is not yet supported on Windows");
         #[cfg(unix)]
         unsafe {
-            let file = std::fs::File::options().read(true).write(true).open(_fp)?;
+            // Determine host mmap protection based on guest flags
+            let mut prot = libc::PROT_READ;
+            if flags.contains(MemoryRegionFlags::WRITE) {
+                prot |= libc::PROT_WRITE;
+            }
+            if flags.contains(MemoryRegionFlags::EXECUTE) {
+                prot |= libc::PROT_EXEC;
+            }
+
+            let file = std::fs::File::options().read(true).open(fp)?;
             let file_size = file.metadata()?.st_size();
             let page_size = page_size::get();
             let size = (file_size as usize).div_ceil(page_size) * page_size;
             let base = libc::mmap(
                 std::ptr::null_mut(),
                 size,
-                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+                prot,
                 libc::MAP_PRIVATE,
                 file.as_raw_fd(),
                 0,
@@ -585,9 +564,9 @@ impl MultiUseSandbox {
 
             if let Err(err) = self.map_region(&MemoryRegion {
                 host_region: base as usize..base.wrapping_add(size) as usize,
-                guest_region: _guest_base as usize.._guest_base as usize + size,
-                flags: MemoryRegionFlags::READ | MemoryRegionFlags::EXECUTE,
-                region_type: MemoryRegionType::Heap,
+                guest_region: guest_base as usize..guest_base as usize + size,
+                flags,
+                region_type: MemoryRegionType::HyperlightFS,
             }) {
                 libc::munmap(base, size);
                 return Err(err);
@@ -652,21 +631,29 @@ impl MultiUseSandbox {
 
             self.mem_mgr.write_guest_function_call(buffer)?;
 
-            let dispatch_res = self.vm.dispatch_call_from_host(
+            self.vm.dispatch_call_from_host(
                 self.dispatch_ptr.clone(),
                 &mut self.mem_mgr,
                 &self.host_funcs,
                 #[cfg(gdb)]
                 self.dbg_mem_access_fn.clone(),
-            );
+            )?;
 
-            // Convert dispatch errors to HyperlightErrors to maintain backwards compatibility
-            // but first determine if sandbox should be poisoned
-            if let Err(e) = dispatch_res {
-                let (error, should_poison) = e.promote();
-                self.poisoned |= should_poison;
-                return Err(error);
+            // Sync FAT mounts to backing files after successful HLT.
+            // This ensures durability: when call() returns Ok, all guest writes
+            // are persisted to disk. We do this before checking guest_result
+            // because the guest may have written data even if it returns an error.
+            // However, we skip this on host-side errors (dispatch_call_from_host
+            // returns Err) to avoid persisting potentially corrupted state.
+            if let Some(ref fs_image) = self.hyperlight_fs {
+                // Log but don't fail the call if msync fails - the writes are
+                // still in the page cache and will eventually be flushed.
+                if let Err(e) = fs_image.msync_fat_mounts() {
+                    tracing::warn!(error = %e, "Failed to sync FAT mounts after HLT");
+                }
             }
+
+            self.mem_mgr.check_stack_guard()?;
 
             let guest_result = self.mem_mgr.get_guest_function_call_result()?.into_inner();
 
@@ -679,10 +666,7 @@ impl MultiUseSandbox {
                     )
                     .increment(1);
 
-                    Err(HyperlightError::GuestError(
-                        guest_error.code,
-                        guest_error.message,
-                    ))
+                    Err(HyperlightError::GuestError(guest_error.code, guest_error.message))
                 }
             }
         })();
@@ -778,6 +762,625 @@ impl MultiUseSandbox {
         crate::hypervisor::crashdump::generate_crashdump(&self.vm)
     }
 
+    // ---- Sandbox Filesystem APIs ----
+    //
+    // These methods allow the host to read/write files in FAT mounts
+    // while the sandbox is paused (between guest function calls).
+    //
+    // Note: Read-only files mapped via HyperlightFS are directly accessible
+    // via the host filesystem - these APIs are specifically for FAT mounts.
+
+    /// Resolve a guest path to a FAT image and relative path.
+    ///
+    /// This is a helper that eliminates boilerplate in the public fs_* methods.
+    /// It validates that HyperlightFS is configured and that the path is within
+    /// a FAT mount.
+    #[cfg(unix)]
+    fn resolve_fat_image(
+        &mut self,
+        guest_path: &str,
+    ) -> Result<(&mut crate::hyperlight_fs::FatImage, String)> {
+        use crate::HyperlightError;
+
+        let fs = self.hyperlight_fs.as_mut().ok_or_else(|| {
+            HyperlightError::Error("No HyperlightFS configured for this sandbox".to_string())
+        })?;
+
+        let (mount_idx, relative_path) = fs.find_fat_mount(guest_path).ok_or_else(|| {
+            HyperlightError::Error(format!("Path '{}' is not within a FAT mount.", guest_path))
+        })?;
+
+        let fat_mounts = fs.fat_mounts_mut();
+        let fat_image = fat_mounts[mount_idx].image_mut();
+
+        Ok((fat_image, relative_path))
+    }
+
+    /// Get metadata (stat) for a file or directory in a FAT mount.
+    ///
+    /// This allows the host to inspect file sizes, timestamps, and types
+    /// in FAT mounts while the sandbox is paused.
+    ///
+    /// # Arguments
+    ///
+    /// * `guest_path` - Absolute path within a FAT mount (e.g., "/mnt/fat/output.txt")
+    ///
+    /// # Returns
+    ///
+    /// [`FatStat`](crate::hyperlight_fs::FatStat) with file metadata on success.
+    ///
+    /// # Errors
+    ///
+    /// - `HyperlightError::Error` if no FAT mounts are configured
+    /// - `HyperlightError::Error` if the path is not within a FAT mount
+    /// - `HyperlightError::Error` if the file/directory doesn't exist
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use hyperlight_host::{MultiUseSandbox, UninitializedSandbox, GuestBinary};
+    /// # use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let fs = HyperlightFSBuilder::new()
+    ///     .add_empty_fat_mount("/mnt/fat", 1024 * 1024)?
+    ///     .build()?;
+    ///
+    /// let mut sandbox: MultiUseSandbox = UninitializedSandbox::new(
+    ///     GuestBinary::FilePath("guest.bin".into()),
+    ///     None
+    /// )?
+    /// .with_hyperlight_fs(fs)
+    /// .evolve()?;
+    ///
+    /// // After guest writes to /mnt/fat/result.txt, check its size
+    /// sandbox.call::<()>("DoWork", ())?;
+    /// let stat = sandbox.fs_stat("/mnt/fat/result.txt")?;
+    /// println!("Result file size: {} bytes", stat.size);
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(unix)]
+    pub fn fs_stat(&mut self, guest_path: &str) -> Result<crate::hyperlight_fs::FatStat> {
+        let (fat_image, relative_path) = self.resolve_fat_image(guest_path)?;
+        fat_image.stat(&relative_path)
+    }
+
+    /// Read a file from a FAT mount into memory.
+    ///
+    /// This allows the host to extract file contents written by the guest.
+    /// For large files, consider using streaming access instead.
+    ///
+    /// # Arguments
+    ///
+    /// * `guest_path` - Absolute path within a FAT mount (e.g., "/mnt/fat/output.txt")
+    ///
+    /// # Returns
+    ///
+    /// The entire file contents as a `Vec<u8>` on success.
+    ///
+    /// # Errors
+    ///
+    /// - `HyperlightError::Error` if no FAT mounts are configured
+    /// - `HyperlightError::Error` if the path is not within a FAT mount
+    /// - `HyperlightError::Error` if the file doesn't exist or is a directory
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use hyperlight_host::{MultiUseSandbox, UninitializedSandbox, GuestBinary};
+    /// # use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let fs = HyperlightFSBuilder::new()
+    ///     .add_empty_fat_mount("/mnt/fat", 1024 * 1024)?
+    ///     .build()?;
+    ///
+    /// let mut sandbox: MultiUseSandbox = UninitializedSandbox::new(
+    ///     GuestBinary::FilePath("guest.bin".into()),
+    ///     None
+    /// )?
+    /// .with_hyperlight_fs(fs)
+    /// .evolve()?;
+    ///
+    /// // After guest writes output, extract it
+    /// sandbox.call::<()>("ProcessData", ())?;
+    /// let output = sandbox.fs_read_file("/mnt/fat/output.json")?;
+    /// let json: serde_json::Value = serde_json::from_slice(&output)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(unix)]
+    pub fn fs_read_file(&mut self, guest_path: &str) -> Result<Vec<u8>> {
+        use std::io::Read;
+
+        use crate::HyperlightError;
+
+        let (fat_image, relative_path) = self.resolve_fat_image(guest_path)?;
+        let mut reader = fat_image.open_file(&relative_path)?;
+        let mut contents = Vec::new();
+        reader.read_to_end(&mut contents).map_err(|e| {
+            HyperlightError::Error(format!("Failed to read '{}': {}", guest_path, e))
+        })?;
+
+        Ok(contents)
+    }
+
+    /// List the contents of a directory in a FAT mount.
+    ///
+    /// Returns entries for all files and subdirectories (excluding "." and "..").
+    ///
+    /// # Arguments
+    ///
+    /// * `guest_path` - Absolute path to a directory within a FAT mount
+    ///
+    /// # Returns
+    ///
+    /// A vector of [`FatEntry`](crate::hyperlight_fs::FatEntry) structs on success.
+    ///
+    /// # Errors
+    ///
+    /// - `HyperlightError::Error` if no FAT mounts are configured
+    /// - `HyperlightError::Error` if the path is not within a FAT mount
+    /// - `HyperlightError::Error` if the path doesn't exist or is not a directory
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use hyperlight_host::{MultiUseSandbox, UninitializedSandbox, GuestBinary};
+    /// # use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let fs = HyperlightFSBuilder::new()
+    ///     .add_empty_fat_mount("/mnt/fat", 1024 * 1024)?
+    ///     .build()?;
+    ///
+    /// let mut sandbox: MultiUseSandbox = UninitializedSandbox::new(
+    ///     GuestBinary::FilePath("guest.bin".into()),
+    ///     None
+    /// )?
+    /// .with_hyperlight_fs(fs)
+    /// .evolve()?;
+    ///
+    /// // After guest creates files, list them
+    /// sandbox.call::<()>("GenerateReports", ())?;
+    /// let entries = sandbox.fs_read_dir("/mnt/fat/reports")?;
+    /// for entry in entries {
+    ///     if entry.stat.is_dir {
+    ///         println!("Directory: {}", entry.name);
+    ///     } else {
+    ///         println!("File: {} ({} bytes)", entry.name, entry.stat.size);
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(unix)]
+    pub fn fs_read_dir(&mut self, guest_path: &str) -> Result<Vec<crate::hyperlight_fs::FatEntry>> {
+        let (fat_image, relative_path) = self.resolve_fat_image(guest_path)?;
+        fat_image.read_dir(&relative_path)
+    }
+
+    /// Write data to a file in a FAT mount.
+    ///
+    /// Creates the file if it doesn't exist, or overwrites it if it does.
+    /// Parent directories must already exist.
+    ///
+    /// This allows the host to inject data into the guest's writable filesystem
+    /// between function calls.
+    ///
+    /// # Arguments
+    ///
+    /// * `guest_path` - Absolute path within a FAT mount (e.g., "/mnt/fat/input.txt")
+    /// * `data` - Data to write to the file
+    ///
+    /// # Errors
+    ///
+    /// - `HyperlightError::Error` if no FAT mounts are configured
+    /// - `HyperlightError::Error` if the path is not within a FAT mount
+    /// - `HyperlightError::Error` if parent directory doesn't exist
+    /// - `HyperlightError::Error` if the filesystem is full
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use hyperlight_host::{MultiUseSandbox, UninitializedSandbox, GuestBinary};
+    /// # use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let fs = HyperlightFSBuilder::new()
+    ///     .add_empty_fat_mount("/mnt/fat", 1024 * 1024)?
+    ///     .build()?;
+    ///
+    /// let mut sandbox: MultiUseSandbox = UninitializedSandbox::new(
+    ///     GuestBinary::FilePath("guest.bin".into()),
+    ///     None
+    /// )?
+    /// .with_hyperlight_fs(fs)
+    /// .evolve()?;
+    ///
+    /// // Inject input data before calling guest function
+    /// sandbox.fs_write_file("/mnt/fat/input.json", b"{\"key\": \"value\"}")?;
+    /// let result: String = sandbox.call("ProcessInput", ())?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(unix)]
+    pub fn fs_write_file(&mut self, guest_path: &str, data: &[u8]) -> Result<()> {
+        use std::io::Write;
+
+        use crate::HyperlightError;
+
+        let (fat_image, relative_path) = self.resolve_fat_image(guest_path)?;
+        let mut writer = fat_image.create_file(&relative_path)?;
+        writer.write_all(data).map_err(|e| {
+            HyperlightError::Error(format!("Failed to write '{}': {}", guest_path, e))
+        })?;
+        writer.flush().map_err(|e| {
+            HyperlightError::Error(format!("Failed to flush '{}': {}", guest_path, e))
+        })?;
+
+        Ok(())
+    }
+
+    /// Create a directory in a FAT mount.
+    ///
+    /// Creates a new directory at the specified path. Parent directories
+    /// must already exist.
+    ///
+    /// # Arguments
+    ///
+    /// * `guest_path` - Absolute path within a FAT mount (e.g., "/mnt/fat/newdir")
+    ///
+    /// # Errors
+    ///
+    /// - `HyperlightError::Error` if no FAT mounts are configured
+    /// - `HyperlightError::Error` if the path is not within a FAT mount
+    /// - `HyperlightError::Error` if the parent directory doesn't exist
+    /// - `HyperlightError::Error` if the directory already exists
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use hyperlight_host::{MultiUseSandbox, UninitializedSandbox, GuestBinary};
+    /// # use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let fs = HyperlightFSBuilder::new()
+    ///     .add_empty_fat_mount("/mnt/fat", 1024 * 1024)?
+    ///     .build()?;
+    ///
+    /// let mut sandbox: MultiUseSandbox = UninitializedSandbox::new(
+    ///     GuestBinary::FilePath("guest.bin".into()),
+    ///     None
+    /// )?
+    /// .with_hyperlight_fs(fs)
+    /// .evolve()?;
+    ///
+    /// // Create a directory for the guest to write files into
+    /// sandbox.fs_mkdir("/mnt/fat/output")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(unix)]
+    pub fn fs_mkdir(&mut self, guest_path: &str) -> Result<()> {
+        let (fat_image, relative_path) = self.resolve_fat_image(guest_path)?;
+        fat_image.create_dir(&relative_path)
+    }
+
+    /// Remove a file from a FAT mount.
+    ///
+    /// # Arguments
+    ///
+    /// * `guest_path` - Absolute path to the file within a FAT mount
+    ///
+    /// # Errors
+    ///
+    /// - `HyperlightError::Error` if no FAT mounts are configured
+    /// - `HyperlightError::Error` if the path is not within a FAT mount
+    /// - `HyperlightError::Error` if the file doesn't exist
+    /// - `HyperlightError::Error` if the path is a directory (use `fs_remove_dir`)
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use hyperlight_host::{MultiUseSandbox, UninitializedSandbox, GuestBinary};
+    /// # use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let fs = HyperlightFSBuilder::new()
+    ///     .add_empty_fat_mount("/mnt/fat", 1024 * 1024)?
+    ///     .build()?;
+    ///
+    /// let mut sandbox: MultiUseSandbox = UninitializedSandbox::new(
+    ///     GuestBinary::FilePath("guest.bin".into()),
+    ///     None
+    /// )?
+    /// .with_hyperlight_fs(fs)
+    /// .evolve()?;
+    ///
+    /// // Remove a file
+    /// sandbox.fs_remove_file("/mnt/fat/temp.txt")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(unix)]
+    pub fn fs_remove_file(&mut self, guest_path: &str) -> Result<()> {
+        let (fat_image, relative_path) = self.resolve_fat_image(guest_path)?;
+        fat_image.delete_file(&relative_path)
+    }
+
+    /// Remove an empty directory from a FAT mount.
+    ///
+    /// # Arguments
+    ///
+    /// * `guest_path` - Absolute path to the directory within a FAT mount
+    ///
+    /// # Errors
+    ///
+    /// - `HyperlightError::Error` if no FAT mounts are configured
+    /// - `HyperlightError::Error` if the path is not within a FAT mount
+    /// - `HyperlightError::Error` if the directory doesn't exist
+    /// - `HyperlightError::Error` if the directory is not empty
+    /// - `HyperlightError::Error` if the path is a file (use `fs_remove_file`)
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use hyperlight_host::{MultiUseSandbox, UninitializedSandbox, GuestBinary};
+    /// # use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let fs = HyperlightFSBuilder::new()
+    ///     .add_empty_fat_mount("/mnt/fat", 1024 * 1024)?
+    ///     .build()?;
+    ///
+    /// let mut sandbox: MultiUseSandbox = UninitializedSandbox::new(
+    ///     GuestBinary::FilePath("guest.bin".into()),
+    ///     None
+    /// )?
+    /// .with_hyperlight_fs(fs)
+    /// .evolve()?;
+    ///
+    /// // Remove an empty directory
+    /// sandbox.fs_remove_dir("/mnt/fat/empty_dir")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(unix)]
+    pub fn fs_remove_dir(&mut self, guest_path: &str) -> Result<()> {
+        let (fat_image, relative_path) = self.resolve_fat_image(guest_path)?;
+        fat_image.delete_dir(&relative_path)
+    }
+
+    /// Rename or move a file/directory within a FAT mount.
+    ///
+    /// Both paths must be within the same FAT mount.
+    ///
+    /// # Arguments
+    ///
+    /// * `old_path` - Current absolute path within a FAT mount
+    /// * `new_path` - New absolute path within the same FAT mount
+    ///
+    /// # Errors
+    ///
+    /// - `HyperlightError::Error` if no FAT mounts are configured
+    /// - `HyperlightError::Error` if either path is not within a FAT mount
+    /// - `HyperlightError::Error` if paths are in different FAT mounts
+    /// - `HyperlightError::Error` if the source doesn't exist
+    /// - `HyperlightError::Error` if the destination already exists
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use hyperlight_host::{MultiUseSandbox, UninitializedSandbox, GuestBinary};
+    /// # use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let fs = HyperlightFSBuilder::new()
+    ///     .add_empty_fat_mount("/mnt/fat", 1024 * 1024)?
+    ///     .build()?;
+    ///
+    /// let mut sandbox: MultiUseSandbox = UninitializedSandbox::new(
+    ///     GuestBinary::FilePath("guest.bin".into()),
+    ///     None
+    /// )?
+    /// .with_hyperlight_fs(fs)
+    /// .evolve()?;
+    ///
+    /// // Rename a file
+    /// sandbox.fs_rename("/mnt/fat/old.txt", "/mnt/fat/new.txt")?;
+    ///
+    /// // Move a file to a subdirectory
+    /// sandbox.fs_rename("/mnt/fat/file.txt", "/mnt/fat/subdir/file.txt")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(unix)]
+    pub fn fs_rename(&mut self, old_path: &str, new_path: &str) -> Result<()> {
+        use crate::HyperlightError;
+
+        let fs = self.hyperlight_fs.as_mut().ok_or_else(|| {
+            HyperlightError::Error("No HyperlightFS configured for this sandbox".to_string())
+        })?;
+
+        let (old_mount_idx, old_relative) = fs.find_fat_mount(old_path).ok_or_else(|| {
+            HyperlightError::Error(format!("Path '{}' is not within a FAT mount.", old_path))
+        })?;
+
+        let (new_mount_idx, new_relative) = fs.find_fat_mount(new_path).ok_or_else(|| {
+            HyperlightError::Error(format!("Path '{}' is not within a FAT mount.", new_path))
+        })?;
+
+        if old_mount_idx != new_mount_idx {
+            return Err(HyperlightError::Error(
+                "Cannot rename across different FAT mounts".to_string(),
+            ));
+        }
+
+        let fat_mounts = fs.fat_mounts_mut();
+        let fat_image = fat_mounts[old_mount_idx].image_mut();
+
+        fat_image.rename(&old_relative, &new_relative)
+    }
+
+    /// Check if a path exists within a FAT mount.
+    ///
+    /// # Arguments
+    ///
+    /// * `guest_path` - Absolute path within a FAT mount
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(true)` if the path exists (file or directory)
+    /// - `Ok(false)` if the path does not exist
+    ///
+    /// # Errors
+    ///
+    /// - `HyperlightError::Error` if no FAT mounts are configured
+    /// - `HyperlightError::Error` if the path is not within a FAT mount
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use hyperlight_host::{MultiUseSandbox, UninitializedSandbox, GuestBinary};
+    /// # use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let fs = HyperlightFSBuilder::new()
+    ///     .add_empty_fat_mount("/mnt/fat", 1024 * 1024)?
+    ///     .build()?;
+    ///
+    /// let mut sandbox: MultiUseSandbox = UninitializedSandbox::new(
+    ///     GuestBinary::FilePath("guest.bin".into()),
+    ///     None
+    /// )?
+    /// .with_hyperlight_fs(fs)
+    /// .evolve()?;
+    ///
+    /// // Check if a file exists after guest execution
+    /// sandbox.call::<()>("ProcessData", ())?;
+    /// if sandbox.fs_exists("/mnt/fat/output.json")? {
+    ///     let data = sandbox.fs_read_file("/mnt/fat/output.json")?;
+    ///     // process data...
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(unix)]
+    pub fn fs_exists(&mut self, guest_path: &str) -> Result<bool> {
+        let (fat_image, relative_path) = self.resolve_fat_image(guest_path)?;
+        fat_image.exists(&relative_path)
+    }
+
+    /// Open a file for streaming read access from a FAT mount.
+    ///
+    /// Returns a reader that implements [`Read`](std::io::Read) and
+    /// [`Seek`](std::io::Seek), allowing efficient access to large files
+    /// without loading them entirely into memory.
+    ///
+    /// # Arguments
+    ///
+    /// * `guest_path` - Absolute path to the file within a FAT mount
+    ///
+    /// # Returns
+    ///
+    /// A [`FatFileReader`](crate::hyperlight_fs::FatFileReader) for streaming reads.
+    ///
+    /// # Errors
+    ///
+    /// - `HyperlightError::Error` if no FAT mounts are configured
+    /// - `HyperlightError::Error` if the path is not within a FAT mount
+    /// - `HyperlightError::Error` if the file doesn't exist or is a directory
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use hyperlight_host::{MultiUseSandbox, UninitializedSandbox, GuestBinary};
+    /// # use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    /// # use std::io::{BufReader, BufRead};
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let fs = HyperlightFSBuilder::new()
+    ///     .add_empty_fat_mount("/mnt/fat", 1024 * 1024)?
+    ///     .build()?;
+    ///
+    /// let mut sandbox: MultiUseSandbox = UninitializedSandbox::new(
+    ///     GuestBinary::FilePath("guest.bin".into()),
+    ///     None
+    /// )?
+    /// .with_hyperlight_fs(fs)
+    /// .evolve()?;
+    ///
+    /// // Stream a large log file line by line
+    /// sandbox.call::<()>("GenerateLogs", ())?;
+    /// let reader = sandbox.fs_open_file("/mnt/fat/large.log")?;
+    /// let buf_reader = BufReader::new(reader);
+    /// for line in buf_reader.lines() {
+    ///     println!("{}", line?);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(unix)]
+    pub fn fs_open_file(
+        &mut self,
+        guest_path: &str,
+    ) -> Result<crate::hyperlight_fs::FatFileReader<'_>> {
+        let (fat_image, relative_path) = self.resolve_fat_image(guest_path)?;
+        fat_image.open_file(&relative_path)
+    }
+
+    /// Create or overwrite a file for streaming write access in a FAT mount.
+    ///
+    /// Returns a writer that implements [`Write`](std::io::Write) and
+    /// [`Seek`](std::io::Seek), allowing efficient writing of large files
+    /// without buffering them entirely in memory.
+    ///
+    /// # Arguments
+    ///
+    /// * `guest_path` - Absolute path to the file within a FAT mount
+    ///
+    /// # Returns
+    ///
+    /// A [`FatFileWriter`](crate::hyperlight_fs::FatFileWriter) for streaming writes.
+    ///
+    /// # Errors
+    ///
+    /// - `HyperlightError::Error` if no FAT mounts are configured
+    /// - `HyperlightError::Error` if the path is not within a FAT mount
+    /// - `HyperlightError::Error` if the parent directory doesn't exist
+    /// - `HyperlightError::Error` if the path is a directory
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use hyperlight_host::{MultiUseSandbox, UninitializedSandbox, GuestBinary};
+    /// # use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    /// # use std::io::Write;
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let fs = HyperlightFSBuilder::new()
+    ///     .add_empty_fat_mount("/mnt/fat", 1024 * 1024)?
+    ///     .build()?;
+    ///
+    /// let mut sandbox: MultiUseSandbox = UninitializedSandbox::new(
+    ///     GuestBinary::FilePath("guest.bin".into()),
+    ///     None
+    /// )?
+    /// .with_hyperlight_fs(fs)
+    /// .evolve()?;
+    ///
+    /// // Stream data into a file
+    /// let mut writer = sandbox.fs_create_file("/mnt/fat/large_input.bin")?;
+    /// for i in 0..1000 {
+    ///     writer.write_all(&[i as u8; 1024])?;
+    /// }
+    /// writer.flush()?;
+    /// drop(writer);  // Release borrow before calling guest
+    ///
+    /// sandbox.call::<()>("ProcessLargeInput", ())?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(unix)]
+    pub fn fs_create_file(
+        &mut self,
+        guest_path: &str,
+    ) -> Result<crate::hyperlight_fs::FatFileWriter<'_>> {
+        let (fat_image, relative_path) = self.resolve_fat_image(guest_path)?;
+        fat_image.create_file(&relative_path)
+    }
+
     /// Returns whether the sandbox is currently poisoned.
     ///
     /// A poisoned sandbox is in an inconsistent state due to the guest not running to completion.
@@ -834,7 +1437,9 @@ impl Callable for MultiUseSandbox {
 
 impl std::fmt::Debug for MultiUseSandbox {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MultiUseSandbox").finish()
+        f.debug_struct("MultiUseSandbox")
+            .field("stack_guard", &self.mem_mgr.get_stack_cookie())
+            .finish()
     }
 }
 
@@ -901,7 +1506,9 @@ mod tests {
         #[cfg(target_os = "linux")]
         {
             let temp_file = std::env::temp_dir().join("test_poison_map_file.bin");
-            let res = sbox.map_file_cow(&temp_file, 0x0).unwrap_err();
+            let res = sbox
+                .map_file_cow(&temp_file, 0x0, MemoryRegionFlags::READ)
+                .unwrap_err();
             assert!(matches!(res, HyperlightError::PoisonedSandbox));
             std::fs::remove_file(&temp_file).ok(); // Clean up
         }
@@ -1036,10 +1643,7 @@ mod tests {
     fn test_with_small_stack_and_heap() {
         let mut cfg = SandboxConfiguration::default();
         cfg.set_heap_size(20 * 1024);
-        // min_scratch_size already includes 1 page (4k on most
-        // platforms) of guest stack, so add 20k more to get 24k total
-        let min_scratch = hyperlight_common::layout::min_scratch_size();
-        cfg.set_scratch_size(min_scratch + 0x5000);
+        cfg.set_stack_size(18 * 1024);
 
         let mut sbox1: MultiUseSandbox = {
             let path = simple_guest_as_string().unwrap();
@@ -1119,38 +1723,41 @@ mod tests {
     }
 
     #[test]
-    fn create_200_sandboxes() {
-        const NUM_THREADS: usize = 10;
-        const SANDBOXES_PER_THREAD: usize = 20;
+    #[ignore] // this test runs by itself because it uses a lot of system resources
+    fn create_1000_sandboxes() {
+        let barrier = Arc::new(Barrier::new(21));
 
-        // barrier to make sure all threads start their work simultaneously
-        let start_barrier = Arc::new(Barrier::new(NUM_THREADS + 1));
-        let mut thread_handles = vec![];
+        let mut handles = vec![];
 
-        for _ in 0..NUM_THREADS {
-            let barrier = start_barrier.clone();
+        for _ in 0..20 {
+            let c = barrier.clone();
 
             let handle = thread::spawn(move || {
-                barrier.wait();
+                c.wait();
 
-                for _ in 0..SANDBOXES_PER_THREAD {
-                    let guest_path = simple_guest_as_string().expect("Guest Binary Missing");
-                    let uninit =
-                        UninitializedSandbox::new(GuestBinary::FilePath(guest_path), None).unwrap();
+                for _ in 0..50 {
+                    let usbox = UninitializedSandbox::new(
+                        GuestBinary::FilePath(
+                            simple_guest_as_string().expect("Guest Binary Missing"),
+                        ),
+                        None,
+                    )
+                    .unwrap();
 
-                    let mut sandbox: MultiUseSandbox = uninit.evolve().unwrap();
+                    let mut multi_use_sandbox: MultiUseSandbox = usbox.evolve().unwrap();
 
-                    let result: i32 = sandbox.call("GetStatic", ()).unwrap();
-                    assert_eq!(result, 0);
+                    let res: i32 = multi_use_sandbox.call("GetStatic", ()).unwrap();
+
+                    assert_eq!(res, 0);
                 }
             });
 
-            thread_handles.push(handle);
+            handles.push(handle);
         }
 
-        start_barrier.wait();
+        barrier.wait();
 
-        for handle in thread_handles {
+        for handle in handles {
             handle.join().unwrap();
         }
     }
@@ -1183,7 +1790,7 @@ mod tests {
         let actual: Vec<u8> = sbox
             .call(
                 "ReadMappedBuffer",
-                (guest_base as u64, expected.len() as u64, true),
+                (guest_base as u64, expected.len() as u64),
             )
             .unwrap();
 
@@ -1295,50 +1902,32 @@ mod tests {
 
         unsafe { sbox.map_region(&region).unwrap() };
         assert_eq!(sbox.vm.get_mapped_regions().count(), 1);
-        let orig_read = sbox
-            .call::<Vec<u8>>(
-                "ReadMappedBuffer",
-                (
-                    guest_base as u64,
-                    hyperlight_common::vmem::PAGE_SIZE as u64,
-                    true,
-                ),
-            )
-            .unwrap();
 
         // 3. Take snapshot 2 with 1 region mapped
         let snapshot2 = sbox.snapshot().unwrap();
         assert_eq!(sbox.vm.get_mapped_regions().count(), 1);
 
-        // 4. Re(store to snapshot 1 (should unmap the region)
+        // 4. Restore to snapshot 1 (should unmap the region)
         sbox.restore(snapshot1.clone()).unwrap();
         assert_eq!(sbox.vm.get_mapped_regions().count(), 0);
-        let is_mapped = sbox
-            .call::<bool>("CheckMapped", (guest_base as u64,))
-            .unwrap();
-        assert!(!is_mapped);
 
-        // 5. Restore forward to snapshot 2 (should have folded the
-        //    region into the snapshot)
+        // 5. Restore forward to snapshot 2 (should remap the region)
         sbox.restore(snapshot2.clone()).unwrap();
-        assert_eq!(sbox.vm.get_mapped_regions().count(), 0);
-        let is_mapped = sbox
-            .call::<bool>("CheckMapped", (guest_base as u64,))
-            .unwrap();
-        assert!(is_mapped);
+        assert_eq!(sbox.vm.get_mapped_regions().count(), 1);
 
         // Verify the region is the same
-        let new_read = sbox
-            .call::<Vec<u8>>(
-                "ReadMappedBuffer",
-                (
-                    guest_base as u64,
-                    hyperlight_common::vmem::PAGE_SIZE as u64,
-                    false,
-                ),
-            )
-            .unwrap();
-        assert_eq!(new_read, orig_read);
+        let mut restored_regions = sbox.vm.get_mapped_regions();
+        assert_eq!(restored_regions.next().unwrap(), &region);
+        assert!(restored_regions.next().is_none());
+        drop(restored_regions);
+
+        // 6. Try map the region again (should fail since already mapped)
+        let err = unsafe { sbox.map_region(&region) };
+        assert!(
+            err.is_err(),
+            "Expected error when remapping existing region: {:?}",
+            err
+        );
     }
 
     #[test]
@@ -1371,41 +1960,6 @@ mod tests {
             u_sbox.evolve().unwrap()
         };
         assert_ne!(sandbox3.id, sandbox_id);
-    }
-
-    /// Test that snapshot restore properly resets vCPU debug registers. This test verifies
-    /// that restore() calls reset_vcpu().
-    #[test]
-    fn snapshot_restore_resets_debug_registers() {
-        let mut sandbox: MultiUseSandbox = {
-            let path = simple_guest_as_string().unwrap();
-            let u_sbox = UninitializedSandbox::new(GuestBinary::FilePath(path), None).unwrap();
-            u_sbox.evolve().unwrap()
-        };
-
-        let snapshot = sandbox.snapshot().unwrap();
-
-        // Verify DR0 is initially 0 (clean state)
-        let dr0_initial: u64 = sandbox.call("GetDr0", ()).unwrap();
-        assert_eq!(dr0_initial, 0, "DR0 should initially be 0");
-
-        // Dirty DR0 by setting it to a known non-zero value
-        const DIRTY_VALUE: u64 = 0xDEAD_BEEF_CAFE_BABE;
-        sandbox.call::<()>("SetDr0", DIRTY_VALUE).unwrap();
-        let dr0_dirty: u64 = sandbox.call("GetDr0", ()).unwrap();
-        assert_eq!(
-            dr0_dirty, DIRTY_VALUE,
-            "DR0 should be dirty after SetDr0 call"
-        );
-
-        // Restore to the snapshot - this should reset vCPU state including debug registers
-        sandbox.restore(snapshot).unwrap();
-
-        let dr0_after_restore: u64 = sandbox.call("GetDr0", ()).unwrap();
-        assert_eq!(
-            dr0_after_restore, 0,
-            "DR0 should be 0 after restore (reset_vcpu should have been called)"
-        );
     }
 
     /// Test that sandboxes can be created and evolved with different heap sizes

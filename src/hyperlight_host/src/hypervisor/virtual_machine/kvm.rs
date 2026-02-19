@@ -103,9 +103,45 @@ impl KvmVm {
     pub(crate) fn new() -> std::result::Result<Self, CreateVmError> {
         let hv = KVM.as_ref().map_err(|e| e.clone())?;
 
+        // hw-interrupts: check for required capabilities
+        #[cfg(feature = "hw-interrupts")]
+        {
+            if !hv.check_extension(kvm_ioctls::Cap::Irqchip) {
+                return Err(CreateVmError::InitializeVm(
+                    kvm_ioctls::Error::new(libc::ENOTSUP).into(),
+                ));
+            }
+
+            if !hv.check_extension(kvm_ioctls::Cap::Pit2) {
+                return Err(CreateVmError::InitializeVm(
+                    kvm_ioctls::Error::new(libc::ENOTSUP).into(),
+                ));
+            }
+        }
+
         let vm_fd = hv
             .create_vm_with_type(0)
             .map_err(|e| CreateVmError::CreateVmFd(e.into()))?;
+
+        // hw-interrupts: create in-kernel IRQ chip and PIT
+        #[cfg(feature = "hw-interrupts")]
+        {
+            vm_fd
+                .create_irq_chip()
+                .map_err(|e| CreateVmError::InitializeVm(e.into()))?;
+
+            // Enable the emulation of a dummy speaker port stub so that writing to port 0x61
+            // does not cause a KVM_EXIT event.
+            let pit_config = kvm_bindings::kvm_pit_config {
+                flags: kvm_bindings::KVM_PIT_SPEAKER_DUMMY,
+                ..Default::default()
+            };
+
+            vm_fd
+                .create_pit2(pit_config)
+                .map_err(|e| CreateVmError::InitializeVm(e.into()))?;
+        }
+
         let vcpu_fd = vm_fd
             .create_vcpu(0)
             .map_err(|e| CreateVmError::CreateVcpuFd(e.into()))?;
@@ -123,6 +159,13 @@ impl KvmVm {
             {
                 entry.eax &= !0xff;
                 entry.eax |= hyperlight_common::layout::MAX_GPA.ilog2() + 1;
+            }
+            // hw-interrupts: enable FXSR, SSE, and SSE2 in CPUID
+            #[cfg(feature = "hw-interrupts")]
+            if entry.function == 1 {
+                entry.edx |= 1 << 24; // FXSR
+                entry.ecx |= 1 << 25; // SSE
+                entry.ecx |= 1 << 26; // SSE2
             }
         }
         vcpu_fd
@@ -392,7 +435,7 @@ impl DebuggableVm for KvmVm {
             return Ok(());
         }
 
-        // Find the first available LOCAL (L0–L3) slot
+        // Find the first available LOCAL (L0-L3) slot
         let i = (0..MAX_NO_OF_HW_BP)
             .position(|i| self.debug_regs.arch.debugreg[7] & (1 << (i * 2)) == 0)
             .ok_or(DebugError::TooManyHwBreakpoints(MAX_NO_OF_HW_BP))?;

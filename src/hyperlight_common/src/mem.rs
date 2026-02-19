@@ -17,6 +17,8 @@ limitations under the License.
 pub const PAGE_SHIFT: u64 = 12;
 pub const PAGE_SIZE: u64 = 1 << 12;
 pub const PAGE_SIZE_USIZE: usize = 1 << 12;
+pub const PAGE_TABLE_SHIFT: u64 = 22;
+pub const PAGE_TABLE_SIZE_USIZE: usize = 1 << 22;
 
 /// A memory region in the guest address space
 #[derive(Debug, Clone, Copy)]
@@ -28,12 +30,33 @@ pub struct GuestMemoryRegion {
     pub ptr: u64,
 }
 
+/// A memory region in the guest address space that is used for the stack
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct GuestStack {
+    /// The top of the user stack
+    pub min_user_stack_address: u64,
+    /// The user stack pointer
+    pub user_stack_address: u64,
+}
+
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct HyperlightPEB {
+    pub security_cookie_seed: u64,
     pub guest_function_dispatch_ptr: u64,
+    pub credits_value: u64,
+    pub code_ptr: u64,
     pub input_stack: GuestMemoryRegion,
     pub output_stack: GuestMemoryRegion,
     pub init_data: GuestMemoryRegion,
     pub guest_heap: GuestMemoryRegion,
+    pub guest_stack: GuestStack,
+    pub host_function_definitions: GuestMemoryRegion,
+    /// The HyperlightFS mapped files region (read-only, no execute).
+    /// If size is 0, no filesystem is available.
+    pub guest_fs_region: GuestMemoryRegion,
+    /// The HyperlightFS manifest (FlatBuffer metadata for file lookup).
+    /// If size is 0, no manifest is available (use with guest_fs_region).
+    pub guest_fs_manifest: GuestMemoryRegion,
 }

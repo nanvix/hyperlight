@@ -23,8 +23,12 @@ extern crate alloc;
 // Modules
 pub mod error;
 pub mod exit;
+pub mod fs;
 pub mod layout;
 pub mod prim_alloc;
+
+// Re-export embedded_io traits for convenience
+pub use embedded_io::{Read, Seek, SeekFrom, Write};
 
 pub mod guest_handle {
     pub mod handle;

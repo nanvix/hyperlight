@@ -99,6 +99,9 @@ test-like-ci config=default-target hypervisor="kvm":
     @# test the tracing related features
     {{ if os() == "linux" { "just test-rust-tracing " + config + " " + if hypervisor == "mshv3" { "mshv3" } else { "kvm" } } else { "" } }}
 
+    @# test the guest crate (fs tests need single-threaded execution)
+    just test-rust-guest {{config}}
+
 code-checks-like-ci config=default-target hypervisor="kvm":
     @# Ensure up-to-date Cargo.lock
     cargo fetch --locked
@@ -252,6 +255,10 @@ test-rust-tracing target=default-target features="":
     {{ cargo-cmd }} test -p hyperlight-guest-tracing -F trace --profile={{ if target == "debug" { "dev" } else { target } }} {{ target-triple-flag }}
     {{ cargo-cmd }} test -p hyperlight-common -F trace_guest --profile={{ if target == "debug" { "dev" } else { target } }} {{ target-triple-flag }}
     {{ cargo-cmd }} test -p hyperlight-host --profile={{ if target == "debug" { "dev" } else { target } }} {{ if features =="" {'--features trace_guest'} else { "--features trace_guest," + features } }} {{ target-triple-flag }}
+
+# rust test for hyperlight-guest (fs tests require --test-threads=1 due to shared global state)
+test-rust-guest target=default-target:
+    cargo test -p hyperlight-guest --profile={{ if target == "debug" { "dev" } else { target } }} -- --test-threads=1
 
 # verify hyperlight-common and hyperlight-guest build for 32-bit (for Nanvix compatibility - uses i686 as proxy for Nanvix's custom 32-bit x86 target)
 check-i686 target=default-target:

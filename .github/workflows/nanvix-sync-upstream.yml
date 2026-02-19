@@ -1,0 +1,456 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+#
+# This workflow monitors upstream Hyperlight (hyperlight-project/hyperlight) and tests
+# compatibility with Nanvix. When upstream changes are detected, it:
+# 1. Checks how far behind upstream the fork is
+# 2. Attempts to rebase nanvix/v0.12.0 onto upstream
+# 3. Clones Nanvix and patches it to use the rebased hyperlight
+# 4. Builds and tests Nanvix to verify no regressions
+# 5. Creates tracking issues when action is needed
+
+name: Nanvix Sync Upstream
+
+on:
+  # Weekly check for upstream changes and integration test.
+  schedule:
+    - cron: "0 2 * * 0"  # Every Sunday at 2 AM UTC
+  # Manual trigger.
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: 'Upstream ref to test against (default: main)'
+        required: false
+        type: string
+        default: 'main'
+      skip_rebase:
+        description: 'Skip rebase attempt and just check status'
+        required: false
+        type: boolean
+        default: false
+      force_issue:
+        description: 'Create tracking issue even if no significant changes'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+env:
+  UPSTREAM_REPO: hyperlight-project/hyperlight
+  NANVIX_REPO: nanvix/nanvix
+  FORK_BRANCH: nanvix/v0.12.0
+
+jobs:
+  # ============================================================================
+  # Job 1: Check upstream status and determine what to do
+  # ============================================================================
+  check-upstream:
+    name: Check Upstream Status
+    runs-on: ubuntu-latest
+    outputs:
+      upstream_tag: ${{ steps.check.outputs.upstream_tag }}
+      upstream_sha: ${{ steps.check.outputs.upstream_sha }}
+      fork_sha: ${{ steps.check.outputs.fork_sha }}
+      ahead_by: ${{ steps.check.outputs.ahead_by }}
+      should_test: ${{ steps.check.outputs.should_test }}
+    steps:
+      - name: Check Upstream Hyperlight
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_REF: ${{ inputs.upstream_ref || 'main' }}
+        run: |
+          set -euo pipefail
+
+          echo "Checking upstream Hyperlight repository..."
+
+          # Get the latest stable release from upstream
+          UPSTREAM_RELEASE=$(curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/releases/latest" 2>/dev/null || echo "{}")
+
+          if [ "$UPSTREAM_RELEASE" != "{}" ] && [ "$(echo "$UPSTREAM_RELEASE" | jq -r '.message // empty')" != "Not Found" ]; then
+            UPSTREAM_TAG=$(echo "$UPSTREAM_RELEASE" | jq -r '.tag_name')
+            echo "Latest upstream release: $UPSTREAM_TAG"
+            echo "upstream_tag=$UPSTREAM_TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "upstream_tag=unknown" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Get upstream ref SHA
+          UPSTREAM_REF_INFO=$(curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/git/refs/heads/${UPSTREAM_REF}" 2>/dev/null || echo "{}")
+
+          if [ "$UPSTREAM_REF_INFO" != "{}" ]; then
+            UPSTREAM_SHA=$(echo "$UPSTREAM_REF_INFO" | jq -r '.object.sha')
+            echo "Upstream $UPSTREAM_REF SHA: $UPSTREAM_SHA"
+            echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Could not fetch upstream ref info"
+            exit 1
+          fi
+
+          # Get fork branch SHA
+          FORK_REF_INFO=$(curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/git/refs/heads/${{ env.FORK_BRANCH }}" 2>/dev/null || echo "{}")
+
+          if [ "$FORK_REF_INFO" != "{}" ]; then
+            FORK_SHA=$(echo "$FORK_REF_INFO" | jq -r '.object.sha')
+            echo "Fork branch SHA: $FORK_SHA"
+            echo "fork_sha=$FORK_SHA" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Could not fetch fork branch info"
+            exit 1
+          fi
+
+          # Compare: how many commits is upstream ahead?
+          COMPARE=$(curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/compare/${FORK_SHA}...${UPSTREAM_REF}" 2>/dev/null || echo "{}")
+
+          if [ "$COMPARE" != "{}" ] && [ "$(echo "$COMPARE" | jq -r '.message // empty')" = "" ]; then
+            AHEAD_BY=$(echo "$COMPARE" | jq -r '.ahead_by // 0')
+            echo "Upstream is $AHEAD_BY commits ahead"
+            echo "ahead_by=$AHEAD_BY" >> "$GITHUB_OUTPUT"
+
+            # Should we run the integration test?
+            if [ "$AHEAD_BY" -gt 0 ]; then
+              echo "should_test=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "should_test=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "::warning::Could not compare repositories"
+            echo "ahead_by=unknown" >> "$GITHUB_OUTPUT"
+            echo "should_test=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ============================================================================
+  # Job 2: Attempt rebase and build hyperlight
+  # ============================================================================
+  rebase-and-build:
+    name: Rebase & Build Hyperlight
+    needs: check-upstream
+    if: needs.check-upstream.outputs.should_test == 'true' && inputs.skip_rebase != true
+    runs-on: ubuntu-latest
+    outputs:
+      rebase_success: ${{ steps.rebase.outputs.success }}
+      hyperlight_build_success: ${{ steps.build-hyperlight.outputs.success }}
+      test_branch: ${{ steps.rebase.outputs.test_branch }}
+    steps:
+      - name: Checkout Fork
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.FORK_BRANCH }}
+          fetch-depth: 0
+
+      - name: Setup Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Install Just
+        uses: extractions/setup-just@v2
+
+      - name: Add Upstream Remote
+        run: |
+          git remote add upstream "https://github.com/${{ env.UPSTREAM_REPO }}.git"
+          git fetch upstream ${{ inputs.upstream_ref || 'main' }}
+
+      - name: Attempt Rebase
+        id: rebase
+        continue-on-error: true
+        env:
+          UPSTREAM_REF: ${{ inputs.upstream_ref || 'main' }}
+        run: |
+          set -euo pipefail
+
+          TEST_BRANCH="test/upstream-sync-$(date +%Y%m%d-%H%M%S)"
+          echo "test_branch=$TEST_BRANCH" >> "$GITHUB_OUTPUT"
+
+          # Create test branch from current fork branch
+          git checkout -b "$TEST_BRANCH"
+
+          # Attempt rebase onto upstream
+          echo "Attempting to rebase onto upstream/$UPSTREAM_REF..."
+          if git rebase "upstream/$UPSTREAM_REF"; then
+            echo "Rebase successful!"
+            echo "success=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Rebase failed - conflicts detected"
+            git rebase --abort || true
+            echo "success=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build Hyperlight (if rebase succeeded)
+        id: build-hyperlight
+        if: steps.rebase.outputs.success == 'true'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+
+          echo "Building hyperlight guests..."
+          if just guests; then
+            echo "Guests built successfully"
+          else
+            echo "::warning::Failed to build guests"
+            echo "success=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          echo "Building hyperlight..."
+          if just build; then
+            echo "Build successful"
+            echo "success=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Build failed"
+            echo "success=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Rebase & Build Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Step | Result |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|------|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Rebase | ${{ steps.rebase.outputs.success || 'skipped' }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Hyperlight Build | ${{ steps.build-hyperlight.outputs.success || 'skipped' }} |" >> "$GITHUB_STEP_SUMMARY"
+
+  # ============================================================================
+  # Job 3: Test with Nanvix (only if hyperlight builds successfully)
+  # This job is more expensive (downloads Docker image) so we only run it
+  # when the rebase and hyperlight build succeed.
+  # ============================================================================
+  test-with-nanvix:
+    name: Test with Nanvix
+    needs: [check-upstream, rebase-and-build]
+    if: |
+      needs.rebase-and-build.outputs.rebase_success == 'true' &&
+      needs.rebase-and-build.outputs.hyperlight_build_success == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      build_success: ${{ steps.build.outputs.success }}
+    steps:
+      - name: Checkout Fork (rebased)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.FORK_BRANCH }}
+          fetch-depth: 0
+
+      - name: Setup Git and Rebase
+        env:
+          UPSTREAM_REF: ${{ inputs.upstream_ref || 'main' }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "https://github.com/${{ env.UPSTREAM_REPO }}.git"
+          git fetch upstream "$UPSTREAM_REF"
+          git rebase "upstream/$UPSTREAM_REF"
+
+      - name: Clone Nanvix
+        run: |
+          git clone --depth 1 "https://github.com/${{ env.NANVIX_REPO }}.git" ../nanvix
+
+      - name: Patch Nanvix to Use Local Hyperlight
+        run: |
+          set -euo pipefail
+          cd ../nanvix
+
+          # Patch Cargo.toml to use local path instead of git
+          HYPERLIGHT_PATH="${{ github.workspace }}"
+
+          # The sed pattern needs to handle the multi-line dependency format
+          # Replace: git = "https://github.com/nanvix/hyperlight", branch = "nanvix/v0.12.0"
+          # With: path = "/path/to/hyperlight"
+          sed -i "s|git = \"https://github.com/nanvix/hyperlight\", branch = \"nanvix/v0.12.0\"|path = \"$HYPERLIGHT_PATH\"|g" Cargo.toml
+
+          echo "Patched Cargo.toml:"
+          grep -A2 "hyperlight" Cargo.toml | head -20
+
+      - name: Build Nanvix with Patched Hyperlight
+        id: build
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          cd ../nanvix
+
+          echo "Building Nanvix with MACHINE=hyperlight..."
+          echo "Note: This downloads a ~15GB Docker image on first run."
+
+          # Build with Docker - the toolchain image will be pulled if not cached
+          if ./z build --with-docker -- all MACHINE=hyperlight BUILD_OPT=no; then
+            echo "success=true" >> "$GITHUB_OUTPUT"
+            echo "Nanvix build successful!"
+          else
+            echo "success=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Nanvix build failed with patched hyperlight"
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Nanvix Integration Test Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Step | Result |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|------|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Nanvix Build | ${{ steps.build.outputs.success || 'skipped' }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "ℹ️ This job verifies that Nanvix compiles with the rebased hyperlight fork." >> "$GITHUB_STEP_SUMMARY"
+
+  # ============================================================================
+  # Job 4: Create tracking issue if needed
+  # ============================================================================
+  create-issue:
+    name: Create Tracking Issue
+    needs: [check-upstream, rebase-and-build, test-with-nanvix]
+    if: |
+      always() &&
+      (needs.rebase-and-build.outputs.rebase_success == 'false' ||
+       needs.rebase-and-build.outputs.hyperlight_build_success == 'false' ||
+       needs.test-with-nanvix.outputs.build_success == 'false' ||
+       inputs.force_issue == true)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check for Existing Issue
+        id: existing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          EXISTING=$(gh issue list \
+            --state open \
+            --label "upstream-sync" \
+            --json number \
+            --jq '.[0].number // empty' 2>/dev/null || echo "")
+
+          echo "existing_issue=$EXISTING" >> "$GITHUB_OUTPUT"
+
+      - name: Create or Update Issue
+        uses: actions/github-script@v7
+        env:
+          UPSTREAM_TAG: ${{ needs.check-upstream.outputs.upstream_tag }}
+          UPSTREAM_SHA: ${{ needs.check-upstream.outputs.upstream_sha }}
+          FORK_SHA: ${{ needs.check-upstream.outputs.fork_sha }}
+          AHEAD_BY: ${{ needs.check-upstream.outputs.ahead_by }}
+          REBASE_SUCCESS: ${{ needs.rebase-and-build.outputs.rebase_success }}
+          HYPERLIGHT_BUILD_SUCCESS: ${{ needs.rebase-and-build.outputs.hyperlight_build_success }}
+          NANVIX_BUILD_SUCCESS: ${{ needs.test-with-nanvix.outputs.build_success }}
+          EXISTING_ISSUE: ${{ steps.existing.outputs.existing_issue }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const date = new Date().toISOString().split('T')[0];
+            const rebaseOk = process.env.REBASE_SUCCESS === 'true';
+            const hlBuildOk = process.env.HYPERLIGHT_BUILD_SUCCESS === 'true';
+            const nvxBuildOk = process.env.NANVIX_BUILD_SUCCESS === 'true';
+
+            let status = '✅ All checks passed';
+            if (!rebaseOk) status = '❌ Rebase failed (conflicts)';
+            else if (!hlBuildOk) status = '⚠️ Hyperlight build failed after rebase';
+            else if (!nvxBuildOk) status = '⚠️ Nanvix build failed with rebased hyperlight';
+
+            const title = `Upstream sync: ${process.env.AHEAD_BY} commits behind - ${status}`;
+            const body = [
+              '## Upstream Hyperlight Sync Status',
+              '',
+              '| Metric | Value |',
+              '|--------|-------|',
+              `| Latest upstream release | ${process.env.UPSTREAM_TAG} |`,
+              `| Upstream SHA | \`${process.env.UPSTREAM_SHA}\` |`,
+              `| Fork SHA | \`${process.env.FORK_SHA}\` |`,
+              `| Commits behind | **${process.env.AHEAD_BY}** |`,
+              `| Rebase status | ${rebaseOk ? '✅ Success' : '❌ Failed'} |`,
+              `| Hyperlight build | ${hlBuildOk ? '✅ Success' : '❌ Failed'} |`,
+              `| Nanvix build | ${nvxBuildOk ? '✅ Success' : (rebaseOk && hlBuildOk ? '❌ Failed' : '⏭️ Skipped')} |`,
+              '',
+              '## Action Items',
+              '',
+              rebaseOk ? '- [x] Rebase onto upstream succeeded' : '- [ ] Resolve rebase conflicts manually',
+              hlBuildOk ? '- [x] Hyperlight builds after rebase' : '- [ ] Fix hyperlight build failures',
+              nvxBuildOk ? '- [x] Nanvix builds with rebased hyperlight' : '- [ ] Fix Nanvix build failures',
+              '- [ ] Review upstream changes for breaking changes',
+              '- [ ] Update fork branch with rebased changes',
+              '- [ ] Update Nanvix to use updated fork',
+              '',
+              '## Useful Commands',
+              '',
+              '```bash',
+              '# Add upstream remote',
+              'git remote add upstream https://github.com/hyperlight-project/hyperlight.git',
+              'git fetch upstream',
+              '',
+              '# Rebase onto upstream main',
+              'git checkout nanvix/v0.12.0',
+              'git rebase upstream/main',
+              '',
+              '# If conflicts, resolve them and continue',
+              'git rebase --continue',
+              '```',
+              '',
+              `[Compare upstream to fork](https://github.com/hyperlight-project/hyperlight/compare/${process.env.FORK_SHA}...main)`,
+              '',
+              '---',
+              `*Auto-generated on ${date}*`
+            ].join('\n');
+
+            const existingIssue = process.env.EXISTING_ISSUE;
+
+            if (existingIssue) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: parseInt(existingIssue),
+                body: `## Update - ${date}\n\n${status}\n\nUpstream is now **${process.env.AHEAD_BY}** commits ahead.`
+              });
+              console.log(`Updated issue #${existingIssue}`);
+            } else {
+              const result = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['upstream-sync']
+              });
+              console.log(`Created issue #${result.data.number}`);
+            }
+
+  # ============================================================================
+  # Job 5: Summary
+  # ============================================================================
+  summary:
+    name: Summary
+    needs: [check-upstream, rebase-and-build, test-with-nanvix, create-issue]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate Summary
+        run: |
+          echo "## Upstream Sync Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Metric | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|--------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Upstream release | ${{ needs.check-upstream.outputs.upstream_tag }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Commits behind | ${{ needs.check-upstream.outputs.ahead_by }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Rebase result | ${{ needs.rebase-and-build.outputs.rebase_success || 'skipped' }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Hyperlight build | ${{ needs.rebase-and-build.outputs.hyperlight_build_success || 'skipped' }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Nanvix build | ${{ needs.test-with-nanvix.outputs.build_success || 'skipped' }} |" >> "$GITHUB_STEP_SUMMARY"

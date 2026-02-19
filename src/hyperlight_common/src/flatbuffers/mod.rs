@@ -22,6 +22,8 @@ pub mod hyperlight {
         pub use self::log_level_generated::*;
         mod guest_event_type_generated;
         pub use self::guest_event_type_generated::*;
+        mod inode_type_generated;
+        pub use self::inode_type_generated::*;
         mod hlint_generated;
         pub use self::hlint_generated::*;
         mod hluint_generated;
@@ -74,5 +76,9 @@ pub mod hyperlight {
         pub use self::host_function_definition_generated::*;
         mod host_function_details_generated;
         pub use self::host_function_details_generated::*;
+        mod inode_generated;
+        pub use self::inode_generated::*;
+        mod hyperlight_fs_generated;
+        pub use self::hyperlight_fs_generated::*;
     } // generated
 } // hyperlight

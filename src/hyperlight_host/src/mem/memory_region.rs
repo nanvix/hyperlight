@@ -35,6 +35,10 @@ use windows::Win32::System::Hypervisor::{self, WHV_MEMORY_ACCESS_TYPE};
 use crate::hypervisor::wrappers::HandleWrapper;
 
 pub(crate) const DEFAULT_GUEST_BLOB_MEM_FLAGS: MemoryRegionFlags = MemoryRegionFlags::READ;
+// TODO(danbugs): this is the most permissable for now, should be configurable later.
+pub(crate) const DEFAULT_EXTRA_MEMORY_MEM_FLAGS: MemoryRegionFlags = MemoryRegionFlags::READ
+    .union(MemoryRegionFlags::WRITE)
+    .union(MemoryRegionFlags::EXECUTE);
 
 bitflags! {
     /// flags representing memory permission for a memory region
@@ -124,6 +128,8 @@ pub enum MemoryRegionType {
     Code,
     /// The region contains the guest's init data
     InitData,
+    /// Extra region set aside for future use
+    ExtraMemory,
     /// The region contains the PEB
     Peb,
     /// The region contains the Host Function Definitions
@@ -134,10 +140,16 @@ pub enum MemoryRegionType {
     OutputData,
     /// The region contains the Heap
     Heap,
-    /// The region contains the Guard Page
+    /// The region contains a Guard Page
+    GuardPage,
+    /// The region contains the Stack
+    Stack,
+    /// The scratch region
     Scratch,
     /// The snapshot region
     Snapshot,
+    /// The region contains the HyperlightFS mapped files (read-only, no execute)
+    HyperlightFS,
 }
 
 /// A trait that distinguishes between different kinds of memory region representations.
@@ -317,7 +329,7 @@ impl<K: MemoryRegionKind> MemoryRegionVecBuilder<K> {
         flags: MemoryRegionFlags,
         region_type: MemoryRegionType,
     ) -> usize {
-        let aligned_size = (size + PAGE_SIZE_USIZE - 1) & !(PAGE_SIZE_USIZE - 1);
+        let aligned_size = super::layout::round_up_to(size, PAGE_SIZE_USIZE);
         self.push(aligned_size, flags, region_type)
     }
 

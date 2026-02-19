@@ -30,7 +30,7 @@ libc = { version = "0.2.182" }
 flatbuffers = "25.12.19"
 framehop = { version = "0.15.0", optional = true }
 fallible-iterator = { version = "0.3.0", optional = true }
-blake3 = "1.8.3"
+blake3 = { version = "1.8.3", features = ["pure"] }
 page_size = "0.6.0"
 termcolor = "1.2.0"
 bitflags = "2.11.0"
@@ -45,12 +45,19 @@ hyperlight-guest-tracing = { workspace = true, default-features = true, optional
 vmm-sys-util = "0.15.0"
 crossbeam-channel = "0.5.15"
 thiserror = "2.0.18"
-chrono = { version = "0.4", optional = true }
+fatfs = { git = "https://github.com/rafalh/rust-fatfs", rev = "4eccb50d011146fbed20e133d33b22f3c27292e7", features = ["lfn"] }
+fs2 = "0.4"
+chrono = { version = "0.4" }
 anyhow = "1.0"
 metrics = "0.24.3"
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+toml = "0.8"
 elfcore = "2.0"
 uuid = { version = "1.21.0", features = ["v4"] }
+glob = "0.3"
+tempfile = "3.19"
+clap = { version = "4.5", features = ["derive"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
@@ -128,7 +135,7 @@ executable_heap = []
 # This feature enables printing of debug information to stdout in debug builds
 print_debug = []
 # Dumps the VM state to a file on unexpected errors or crashes. The path of the file will be printed on stdout and logged.
-crashdump = ["dep:chrono"]
+crashdump = []
 trace_guest = ["dep:opentelemetry", "dep:tracing-opentelemetry", "dep:hyperlight-guest-tracing", "hyperlight-common/trace_guest"]
 mem_profile = [ "trace_guest", "dep:framehop", "dep:fallible-iterator", "hyperlight-common/mem_profile" ]
 kvm = ["dep:kvm-bindings", "dep:kvm-ioctls"]
@@ -138,6 +145,7 @@ gdb = ["dep:gdbstub", "dep:gdbstub_arch"]
 fuzzing = ["hyperlight-common/fuzzing"]
 build-metadata = ["dep:built"]
 init-paging = []
+hw-interrupts = []
 
 [[bench]]
 name = "benchmarks"

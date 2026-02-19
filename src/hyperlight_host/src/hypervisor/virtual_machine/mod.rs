@@ -126,6 +126,9 @@ pub(crate) enum VmExit {
     Halt(),
     /// The vCPU has issued a write to the given port with the given value
     IoOut(u16, Vec<u8>),
+    /// The vCPU has issued a read from the given port (access_size in bytes)
+    #[allow(dead_code)]
+    IoIn(u16, u8),
     /// The vCPU tried to read from the given (unmapped) addr
     MmioRead(u64),
     /// The vCPU tried to write to the given (unmapped) addr

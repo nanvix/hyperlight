@@ -88,7 +88,12 @@ pub extern "C" fn hl_flatbuffer_result_from_String(value: *const c_char) -> Box<
 
 #[unsafe(no_mangle)]
 pub extern "C" fn hl_flatbuffer_result_from_Bytes(data: *const u8, len: usize) -> Box<FfiVec> {
-    let slice = unsafe { core::slice::from_raw_parts(data, len) };
+    // Handle NULL pointer (empty result) - passing NULL with len=0 is valid
+    let slice = if data.is_null() {
+        &[]
+    } else {
+        unsafe { core::slice::from_raw_parts(data, len) }
+    };
 
     let vec = get_flatbuffer_result(slice);
 

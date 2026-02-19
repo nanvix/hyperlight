@@ -178,6 +178,10 @@ After having an environment with a hypervisor setup, running the example has the
         fi
         ```
 
+5. **(Optional)** For working with FAT32 filesystem images (used by HyperlightFS scripts in `src/hyperlight_host/scripts/`):
+    - On Ubuntu/Debian, run: `sudo apt install mtools dosfstools`
+    - On Azure Linux, run: `sudo dnf install mtools dosfstools`
+
 Then, we are ready to build and run the example:
 
 ```sh

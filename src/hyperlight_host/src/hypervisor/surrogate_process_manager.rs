@@ -56,7 +56,24 @@ pub(crate) const SURROGATE_PROCESS_BINARY_NAME: &str = "hyperlight_surrogate.exe
 
 /// The maximum number of surrogate processes that can be created.
 /// (This is a factor of limitations in the `WHvMapGpaRange2` API which only allows 512 different process handles).
-const NUMBER_OF_SURROGATE_PROCESSES: usize = 512;
+const MAX_SURROGATE_PROCESSES: usize = 512;
+
+/// Default number of surrogate processes when `HYPERLIGHT_SURROGATE_COUNT` is
+/// not set. Using a small default avoids spawning hundreds of processes
+/// upfront, which can take several seconds. Callers that need more concurrent
+/// partitions can set the env var up to `MAX_SURROGATE_PROCESSES`.
+const DEFAULT_SURROGATE_PROCESSES: usize = 2;
+
+/// Returns the number of surrogate processes to create.
+/// Reads from the `HYPERLIGHT_SURROGATE_COUNT` environment variable if set,
+/// otherwise defaults to `DEFAULT_SURROGATE_PROCESSES`.
+fn number_of_surrogate_processes() -> usize {
+    std::env::var("HYPERLIGHT_SURROGATE_COUNT")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .map(|n| n.min(MAX_SURROGATE_PROCESSES).max(1))
+        .unwrap_or(DEFAULT_SURROGATE_PROCESSES)
+}
 
 /// `SurrogateProcessManager` manages hyperlight_surrogate processes. These
 /// processes are required to allow multiple WHP Partitions to be created in a
@@ -132,12 +149,12 @@ impl SurrogateProcessManager {
             .create_surrogate_processes(&surrogate_process_path, job_handle)?;
         Ok(surrogate_process_manager)
     }
-    /// Gets a surrogate process from the pool of surrogate processes and
-    /// allocates memory in the process. This should be called when a new
-    /// HyperV on Windows Driver is created.
+    /// Gets a surrogate process from the pool of surrogate processes.
+    /// This should be called when a new HyperV on Windows Driver is created.
     #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
     pub(super) fn get_surrogate_process(&self) -> Result<SurrogateProcess> {
         let surrogate_process_handle: HANDLE = self.process_receiver.recv()?.into();
+
         Ok(SurrogateProcess::new(surrogate_process_handle))
     }
 
@@ -156,7 +173,7 @@ impl SurrogateProcessManager {
         surrogate_process_path: &Path,
         job_handle: HandleWrapper,
     ) -> Result<()> {
-        for _ in 0..NUMBER_OF_SURROGATE_PROCESSES {
+        for _ in 0..number_of_surrogate_processes() {
             let surrogate_process = create_surrogate_process(surrogate_process_path, job_handle)?;
             self.process_sender.clone().send(surrogate_process)?;
         }
@@ -358,7 +375,7 @@ mod tests {
         // create more threads than surrogate processes as we want to test that
         // the manager can handle multiple threads requesting processes at the
         // same time when there are not enough processes available.
-        for t in 0..NUMBER_OF_SURROGATE_PROCESSES * 2 {
+        for t in 0..MAX_SURROGATE_PROCESSES * 2 {
             let thread_handle = thread::spawn(move || -> Result<()> {
                 let surrogate_process_manager_res = get_surrogate_process_manager();
                 let mut rng = rng();
@@ -368,10 +385,11 @@ mod tests {
                 // for each of the parent loop iterations, try to get a
                 // surrogate process, make sure we actually got one,
                 // then put it back
-                for p in 0..NUMBER_OF_SURROGATE_PROCESSES {
+                for p in 0..MAX_SURROGATE_PROCESSES {
                     let timer = Instant::now();
                     let surrogate_process = {
-                        let res = surrogate_process_manager.get_surrogate_process()?;
+                        let res = surrogate_process_manager
+                            .get_surrogate_process()?;
                         let elapsed = timer.elapsed();
                         // Print out the time it took to get the process if its greater than 150ms (this is just to allow us to see that threads are blocking on the process queue)
                         if (elapsed.as_millis() as u64) > 150 {
@@ -406,7 +424,7 @@ mod tests {
             assert!(thread_handle.join().is_ok());
         }
 
-        assert_number_of_surrogate_processes(NUMBER_OF_SURROGATE_PROCESSES);
+        assert_number_of_surrogate_processes(number_of_surrogate_processes());
     }
 
     #[track_caller]
@@ -454,10 +472,11 @@ mod tests {
         let mem = ExclusiveSharedMemory::new(SIZE).unwrap();
 
         let mut process = mgr.get_surrogate_process().unwrap();
-        let surrogate_address = process
+        let host_base = mem.raw_ptr() as usize;
+        let allocated_address = process
             .map(
                 HandleWrapper::from(mem.get_mmap_file_handle()),
-                mem.raw_ptr() as usize,
+                host_base,
                 mem.raw_mem_size(),
             )
             .unwrap();
@@ -470,7 +489,7 @@ mod tests {
             // read the first guard page, should fail
             let success = windows::Win32::System::Diagnostics::Debug::ReadProcessMemory(
                 process_handle,
-                surrogate_address,
+                allocated_address,
                 buffer.as_ptr() as *mut c_void,
                 SIZE,
                 bytes_read,
@@ -480,7 +499,7 @@ mod tests {
             // read the memory, should be OK
             let success = windows::Win32::System::Diagnostics::Debug::ReadProcessMemory(
                 process_handle,
-                surrogate_address.wrapping_add(SIZE),
+                allocated_address.add(SIZE),
                 buffer.as_ptr() as *mut c_void,
                 SIZE,
                 bytes_read,
@@ -490,7 +509,7 @@ mod tests {
             // read the second guard page, should fail
             let success = windows::Win32::System::Diagnostics::Debug::ReadProcessMemory(
                 process_handle,
-                surrogate_address.wrapping_add(2 * SIZE),
+                allocated_address.add(2 * SIZE),
                 buffer.as_ptr() as *mut c_void,
                 SIZE,
                 bytes_read,

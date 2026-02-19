@@ -74,6 +74,12 @@ pub struct SandboxConfiguration {
     interrupt_vcpu_sigrtmin_offset: u8,
     /// How much writable memory to offer the guest
     scratch_size: usize,
+    /// The size of the host function definition buffer.
+    /// This has its own page in memory to be READ-ONLY from the guest's perspective.
+    host_function_definition_size: usize,
+    /// The stack size to use in the guest sandbox. If set to 0, the stack
+    /// size will be determined from the PE file header
+    stack_size_override: u64,
 }
 
 impl SandboxConfiguration {
@@ -93,6 +99,12 @@ impl SandboxConfiguration {
     pub const DEFAULT_HEAP_SIZE: u64 = 131072;
     /// The default size of the scratch region
     pub const DEFAULT_SCRATCH_SIZE: usize = 0x40000;
+    /// The default host function definition size
+    pub const DEFAULT_HOST_FUNCTION_DEFINITION_SIZE: usize = 0x1000;
+    /// The minimum host function definition size
+    pub const MIN_HOST_FUNCTION_DEFINITION_SIZE: usize = 0x1000;
+    /// The default stack size
+    pub const DEFAULT_STACK_SIZE: u64 = 65536;
 
     #[allow(clippy::too_many_arguments)]
     /// Create a new configuration for a sandbox with the given sizes.
@@ -102,6 +114,8 @@ impl SandboxConfiguration {
         output_data_size: usize,
         heap_size_override: Option<u64>,
         scratch_size: usize,
+        host_function_definition_size: usize,
+        stack_size_override: u64,
         interrupt_retry_delay: Duration,
         interrupt_vcpu_sigrtmin_offset: u8,
         #[cfg(gdb)] guest_debug_info: Option<DebugInfo>,
@@ -112,6 +126,11 @@ impl SandboxConfiguration {
             output_data_size: max(output_data_size, Self::MIN_OUTPUT_SIZE),
             heap_size_override: heap_size_override.unwrap_or(0),
             scratch_size,
+            host_function_definition_size: max(
+                host_function_definition_size,
+                Self::MIN_HOST_FUNCTION_DEFINITION_SIZE,
+            ),
+            stack_size_override,
             interrupt_retry_delay,
             interrupt_vcpu_sigrtmin_offset,
             #[cfg(gdb)]
@@ -215,6 +234,33 @@ impl SandboxConfiguration {
         self.scratch_size = scratch_size;
     }
 
+    /// Set the size of the host function definition buffer
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
+    pub fn set_host_function_definition_size(&mut self, size: usize) {
+        self.host_function_definition_size = max(size, Self::MIN_HOST_FUNCTION_DEFINITION_SIZE);
+    }
+
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
+    pub(crate) fn get_host_function_definition_size(&self) -> usize {
+        self.host_function_definition_size
+    }
+
+    /// Set the stack size to use in the guest sandbox
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
+    pub fn set_stack_size(&mut self, stack_size: u64) {
+        self.stack_size_override = stack_size;
+    }
+
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
+    pub(crate) fn get_stack_size(&self) -> u64 {
+        self.stack_size_override
+    }
+
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
+    pub(crate) fn stack_size_override_opt(&self) -> Option<u64> {
+        (self.stack_size_override > 0).then_some(self.stack_size_override)
+    }
+
     #[cfg(crashdump)]
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub(crate) fn get_guest_core_dump(&self) -> bool {
@@ -249,6 +295,8 @@ impl Default for SandboxConfiguration {
             Self::DEFAULT_OUTPUT_SIZE,
             None,
             Self::DEFAULT_SCRATCH_SIZE,
+            Self::DEFAULT_HOST_FUNCTION_DEFINITION_SIZE,
+            Self::DEFAULT_STACK_SIZE,
             Self::DEFAULT_INTERRUPT_RETRY_DELAY,
             Self::INTERRUPT_VCPU_SIGRTMIN_OFFSET,
             #[cfg(gdb)]
@@ -274,6 +322,8 @@ mod tests {
             OUTPUT_DATA_SIZE_OVERRIDE,
             Some(HEAP_SIZE_OVERRIDE),
             SCRATCH_SIZE_OVERRIDE,
+            SandboxConfiguration::DEFAULT_HOST_FUNCTION_DEFINITION_SIZE,
+            SandboxConfiguration::DEFAULT_STACK_SIZE,
             SandboxConfiguration::DEFAULT_INTERRUPT_RETRY_DELAY,
             SandboxConfiguration::INTERRUPT_VCPU_SIGRTMIN_OFFSET,
             #[cfg(gdb)]
@@ -302,6 +352,8 @@ mod tests {
             SandboxConfiguration::MIN_OUTPUT_SIZE - 1,
             None,
             SandboxConfiguration::DEFAULT_SCRATCH_SIZE,
+            SandboxConfiguration::DEFAULT_HOST_FUNCTION_DEFINITION_SIZE,
+            SandboxConfiguration::DEFAULT_STACK_SIZE,
             SandboxConfiguration::DEFAULT_INTERRUPT_RETRY_DELAY,
             SandboxConfiguration::INTERRUPT_VCPU_SIGRTMIN_OFFSET,
             #[cfg(gdb)]

@@ -17,6 +17,8 @@ serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 hyperlight-common = { workspace = true, default-features = false }
 flatbuffers = { version= "25.12.19", default-features = false }
 tracing = { version = "0.1.44", default-features = false, features = ["attributes"] }
+embedded-io = { version = "0.7", default-features = false }
+fatfs = { git = "https://github.com/rafalh/rust-fatfs", rev = "4eccb50d011146fbed20e133d33b22f3c27292e7", default-features = false, features = ["alloc", "lfn"] }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 hyperlight-guest-tracing = { workspace = true, default-features = false, optional = true }

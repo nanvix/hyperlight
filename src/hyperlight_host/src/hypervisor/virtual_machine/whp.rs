@@ -15,6 +15,8 @@ limitations under the License.
 */
 
 use std::os::raw::c_void;
+#[cfg(feature = "hw-interrupts")]
+use std::time::{Duration, Instant};
 
 #[cfg(feature = "trace_guest")]
 use tracing::Span;
@@ -28,6 +30,8 @@ use windows_result::HRESULT;
 
 #[cfg(gdb)]
 use crate::hypervisor::gdb::{DebugError, DebuggableVm};
+#[cfg(feature = "hw-interrupts")]
+use crate::hypervisor::pic_pit::{Pic, Pit};
 use crate::hypervisor::regs::{
     Align16, CommonDebugRegs, CommonFpu, CommonRegisters, CommonSpecialRegisters,
     FP_CONTROL_WORD_DEFAULT, MXCSR_DEFAULT, WHP_DEBUG_REGS_NAMES, WHP_DEBUG_REGS_NAMES_LEN,
@@ -43,6 +47,17 @@ use crate::hypervisor::virtual_machine::{
 use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
 #[cfg(feature = "trace_guest")]
 use crate::sandbox::trace::TraceContext as SandboxTraceContext;
+
+/// Minimum effective timer period for WHP timer interrupt injection.
+///
+/// WHP timer injection requires interrupt window exits + pending interruption
+/// register writes, which are more expensive than KVM's in-kernel irqchip.
+/// Additionally, the guest timer ISR (scheduler, bookkeeping) runs on each
+/// injection. Clamping to 50ms (20 Hz) provides sufficient timer granularity
+/// for preemptive scheduling while minimizing host-side API call overhead and
+/// guest ISR execution time.
+#[cfg(feature = "hw-interrupts")]
+const WHP_MIN_TIMER_PERIOD: Duration = Duration::from_millis(50);
 
 #[allow(dead_code)] // Will be used for runtime hypervisor detection
 pub(crate) fn is_hypervisor_present() -> bool {
@@ -71,6 +86,16 @@ pub(crate) struct WhpVm {
     partition: WHV_PARTITION_HANDLE,
     // Surrogate process for memory mapping
     surrogate_process: SurrogateProcess,
+    #[cfg(feature = "hw-interrupts")]
+    pic: Pic,
+    #[cfg(feature = "hw-interrupts")]
+    pit: Pit,
+    #[cfg(feature = "hw-interrupts")]
+    last_tick: Instant,
+    // Cached RFLAGS from the last vCPU exit context, used for timer
+    // injection decisions without an extra WHvGetVirtualProcessorRegisters call.
+    #[cfg(feature = "hw-interrupts")]
+    cached_rflags: u64,
 }
 
 // Safety: `WhpVm` is !Send because it holds `SurrogateProcess` which contains a raw pointer
@@ -109,6 +134,14 @@ impl WhpVm {
         Ok(WhpVm {
             partition,
             surrogate_process,
+            #[cfg(feature = "hw-interrupts")]
+            pic: Pic::new(),
+            #[cfg(feature = "hw-interrupts")]
+            pit: Pit::new(),
+            #[cfg(feature = "hw-interrupts")]
+            last_tick: Instant::now(),
+            #[cfg(feature = "hw-interrupts")]
+            cached_rflags: 0,
         })
     }
 
@@ -219,91 +252,211 @@ impl VirtualMachine for WhpVm {
         &mut self,
         #[cfg(feature = "trace_guest")] tc: &mut SandboxTraceContext,
     ) -> std::result::Result<VmExit, RunVcpuError> {
-        let mut exit_context: WHV_RUN_VP_EXIT_CONTEXT = Default::default();
+        loop {
+            // --- Timer injection (hw-interrupts only) ---
+            // Before each vCPU entry, check if a timer tick is due and the guest
+            // can accept interrupts (IF=1), then inject via WHvRegisterPendingInterruption.
+            // Uses cached RFLAGS from the previous exit context to avoid an expensive
+            // WHvGetVirtualProcessorRegisters call.  When IF=0, requests an interrupt
+            // window exit so WHP notifies us as soon as the guest enables interrupts.
+            #[cfg(feature = "hw-interrupts")]
+            if let Some(period) = self.pit.period() {
+                let effective_period = period.max(WHP_MIN_TIMER_PERIOD);
+                let elapsed = self.last_tick.elapsed();
+                if elapsed >= effective_period {
+                    let interrupts_enabled = self.cached_rflags & (1 << 9) != 0;
 
-        // setup_trace_guest must be called right before WHvRunVirtualProcessor() call, because
-        // it sets the guest span, no other traces or spans must be setup in between these calls.
-        #[cfg(feature = "trace_guest")]
-        tc.setup_guest_trace(Span::current().context());
-        unsafe {
-            WHvRunVirtualProcessor(
-                self.partition,
-                0,
-                &mut exit_context as *mut _ as *mut c_void,
-                std::mem::size_of::<WHV_RUN_VP_EXIT_CONTEXT>() as u32,
-            )
-            .map_err(|e| RunVcpuError::Unknown(e.into()))?;
-        }
-        let result = match exit_context.ExitReason {
-            WHvRunVpExitReasonX64IoPortAccess => unsafe {
-                let instruction_length = exit_context.VpContext._bitfield & 0xF;
-                let rip = exit_context.VpContext.Rip + instruction_length as u64;
-                self.set_registers(&[(
-                    WHvX64RegisterRip,
-                    Align16(WHV_REGISTER_VALUE { Reg64: rip }),
-                )])
-                .map_err(|e| RunVcpuError::IncrementRip(e.into()))?;
-                VmExit::IoOut(
-                    exit_context.Anonymous.IoPortAccess.PortNumber,
-                    exit_context
-                        .Anonymous
-                        .IoPortAccess
-                        .Rax
-                        .to_le_bytes()
-                        .to_vec(),
-                )
-            },
-            WHvRunVpExitReasonX64Halt => VmExit::Halt(),
-            WHvRunVpExitReasonMemoryAccess => {
-                let gpa = unsafe { exit_context.Anonymous.MemoryAccess.Gpa };
-                let access_info = unsafe {
-                    WHV_MEMORY_ACCESS_TYPE(
-                        // 2 first bits are the access type, see https://learn.microsoft.com/en-us/virtualization/api/hypervisor-platform/funcs/memoryaccess#syntax
-                        (exit_context.Anonymous.MemoryAccess.AccessInfo.AsUINT32 & 0b11) as i32,
-                    )
-                };
-                let access_info = MemoryRegionFlags::try_from(access_info)
-                    .map_err(|_| RunVcpuError::ParseGpaAccessInfo)?;
-                match access_info {
-                    MemoryRegionFlags::READ => VmExit::MmioRead(gpa),
-                    MemoryRegionFlags::WRITE => VmExit::MmioWrite(gpa),
-                    _ => VmExit::Unknown("Unknown memory access type".to_string()),
-                }
-            }
-            // Execution was cancelled by the host.
-            WHvRunVpExitReasonCanceled => VmExit::Cancelled(),
-            #[cfg(gdb)]
-            WHvRunVpExitReasonException => {
-                let exception = unsafe { exit_context.Anonymous.VpException };
-
-                // Get the DR6 register to see which breakpoint was hit
-                let dr6 = {
-                    let names = [WHvX64RegisterDr6];
-                    let mut out: [Align16<WHV_REGISTER_VALUE>; 1] = unsafe { std::mem::zeroed() };
-                    unsafe {
-                        WHvGetVirtualProcessorRegisters(
-                            self.partition,
-                            0,
-                            names.as_ptr(),
-                            1,
-                            out.as_mut_ptr() as *mut WHV_REGISTER_VALUE,
-                        )
-                        .map_err(|e| RunVcpuError::GetDr6(e.into()))?;
+                    if interrupts_enabled {
+                        self.last_tick = Instant::now();
+                        let vector = self.pic.master_vector_base() as u64;
+                        // Format: bit 31 = valid, bits 10:8 = type (0 = external), bits 7:0 = vector
+                        let pending = vector | (1u64 << 31);
+                        self.set_registers(&[(
+                            WHvRegisterPendingInterruption,
+                            Align16(WHV_REGISTER_VALUE { Reg64: pending }),
+                        )])
+                        .map_err(|e| RunVcpuError::Unknown(e.into()))?;
+                    } else {
+                        // IF=0: request an interrupt window exit so WHP exits as
+                        // soon as the guest sets IF=1 during execution.
+                        self.set_registers(&[(
+                            WHvX64RegisterDeliverabilityNotifications,
+                            Align16(WHV_REGISTER_VALUE { Reg64: 1 }), // bit 0 = InterruptNotification
+                        )])
+                        .map_err(|e| RunVcpuError::Unknown(e.into()))?;
                     }
-                    unsafe { out[0].0.Reg64 }
-                };
-
-                VmExit::Debug {
-                    dr6,
-                    exception: exception.ExceptionType as u32,
                 }
             }
-            WHV_RUN_VP_EXIT_REASON(_) => VmExit::Unknown(format!(
-                "Unknown exit reason '{}'",
-                exit_context.ExitReason.0
-            )),
-        };
-        Ok(result)
+
+            let mut exit_context: WHV_RUN_VP_EXIT_CONTEXT = Default::default();
+
+            // setup_trace_guest must be called right before WHvRunVirtualProcessor() call, because
+            // it sets the guest span, no other traces or spans must be setup in between these calls.
+            #[cfg(feature = "trace_guest")]
+            tc.setup_guest_trace(Span::current().context());
+            unsafe {
+                WHvRunVirtualProcessor(
+                    self.partition,
+                    0,
+                    &mut exit_context as *mut _ as *mut c_void,
+                    std::mem::size_of::<WHV_RUN_VP_EXIT_CONTEXT>() as u32,
+                )
+                .map_err(|e| RunVcpuError::Unknown(e.into()))?;
+            }
+
+            // Cache RFLAGS from the exit context for the next timer check.
+            #[cfg(feature = "hw-interrupts")]
+            {
+                self.cached_rflags = exit_context.VpContext.Rflags;
+            }
+
+            let result = match exit_context.ExitReason {
+                // Interrupt window: the guest just enabled IF=1 after we
+                // requested a deliverability notification.  Inject the
+                // pending timer interrupt and re-enter immediately.
+                WHvRunVpExitReasonX64InterruptWindow => {
+                    #[cfg(feature = "hw-interrupts")]
+                    if let Some(_period) = self.pit.period() {
+                        self.last_tick = Instant::now();
+                        let vector = self.pic.master_vector_base() as u64;
+                        let pending = vector | (1u64 << 31);
+                        self.set_registers(&[(
+                            WHvRegisterPendingInterruption,
+                            Align16(WHV_REGISTER_VALUE { Reg64: pending }),
+                        )])
+                        .map_err(|e| RunVcpuError::Unknown(e.into()))?;
+                    }
+                    continue;
+                }
+                WHvRunVpExitReasonX64IoPortAccess => unsafe {
+                    let instruction_length = exit_context.VpContext._bitfield & 0xF;
+                    let rip = exit_context.VpContext.Rip + instruction_length as u64;
+                    self.set_registers(&[(
+                        WHvX64RegisterRip,
+                        Align16(WHV_REGISTER_VALUE { Reg64: rip }),
+                    )])
+                    .map_err(|e| RunVcpuError::IncrementRip(e.into()))?;
+
+                    let access_info = exit_context.Anonymous.IoPortAccess.AccessInfo.AsUINT32;
+                    let is_write = access_info & 0x1 != 0;
+                    let access_size = ((access_info >> 1) & 0x7) as usize;
+                    let port = exit_context.Anonymous.IoPortAccess.PortNumber;
+                    let rax = exit_context.Anonymous.IoPortAccess.Rax;
+
+                    if is_write {
+                        // === IO OUT ===
+                        let mask = match access_size {
+                            1 => 0xFFu64,
+                            2 => 0xFFFFu64,
+                            4 => 0xFFFF_FFFFu64,
+                            _ => u64::MAX,
+                        };
+                        let data_val = rax & mask;
+
+                        #[cfg(feature = "hw-interrupts")]
+                        if self.handle_hw_io_out(port, data_val as u8) {
+                            continue; // re-enter vCPU
+                        }
+
+                        VmExit::IoOut(
+                            port,
+                            data_val.to_le_bytes()[..access_size.max(1)].to_vec(),
+                        )
+                    } else {
+                        // === IO IN ===
+                        #[cfg(feature = "hw-interrupts")]
+                        if let Some(val) = self.pic.handle_io_in(port) {
+                            // Set RAX with response value, preserving upper bits
+                            let mask = match access_size {
+                                1 => 0xFFu64,
+                                2 => 0xFFFFu64,
+                                4 => 0xFFFF_FFFFu64,
+                                _ => u64::MAX,
+                            };
+                            let new_rax = (rax & !mask) | (val as u64 & mask);
+                            self.set_registers(&[(
+                                WHvX64RegisterRax,
+                                Align16(WHV_REGISTER_VALUE { Reg64: new_rax }),
+                            )])
+                            .map_err(|e| RunVcpuError::Unknown(e.into()))?;
+                            continue; // re-enter vCPU
+                        }
+                        VmExit::IoIn(port, access_size as u8)
+                    }
+                },
+                WHvRunVpExitReasonX64Halt => {
+                    // When hw-interrupts are enabled and the PIT is configured,
+                    // HLT means "wait for the next interrupt". Sleep until the
+                    // next timer tick, inject the interrupt, and re-enter.
+                    #[cfg(feature = "hw-interrupts")]
+                    if let Some(period) = self.pit.period() {
+                        let elapsed = self.last_tick.elapsed();
+                        if elapsed < period {
+                            std::thread::sleep(period - elapsed);
+                        }
+                        self.last_tick = Instant::now();
+                        let vector = self.pic.master_vector_base() as u64;
+                        let pending = vector | (1u64 << 31);
+                        self.set_registers(&[(
+                            WHvRegisterPendingInterruption,
+                            Align16(WHV_REGISTER_VALUE { Reg64: pending }),
+                        )])
+                        .map_err(|e| RunVcpuError::Unknown(e.into()))?;
+                        continue; // re-enter vCPU
+                    }
+                    VmExit::Halt()
+                }
+                WHvRunVpExitReasonMemoryAccess => {
+                    let gpa = unsafe { exit_context.Anonymous.MemoryAccess.Gpa };
+                    let access_info = unsafe {
+                        WHV_MEMORY_ACCESS_TYPE(
+                            // 2 first bits are the access type, see https://learn.microsoft.com/en-us/virtualization/api/hypervisor-platform/funcs/memoryaccess#syntax
+                            (exit_context.Anonymous.MemoryAccess.AccessInfo.AsUINT32 & 0b11) as i32,
+                        )
+                    };
+                    let access_info = MemoryRegionFlags::try_from(access_info)
+                        .map_err(|_| RunVcpuError::ParseGpaAccessInfo)?;
+                    match access_info {
+                        MemoryRegionFlags::READ => VmExit::MmioRead(gpa),
+                        MemoryRegionFlags::WRITE => VmExit::MmioWrite(gpa),
+                        _ => VmExit::Unknown("Unknown memory access type".to_string()),
+                    }
+                }
+                // Execution was cancelled by the host.
+                WHvRunVpExitReasonCanceled => VmExit::Cancelled(),
+                #[cfg(gdb)]
+                WHvRunVpExitReasonException => {
+                    let exception = unsafe { exit_context.Anonymous.VpException };
+
+                    // Get the DR6 register to see which breakpoint was hit
+                    let dr6 = {
+                        let names = [WHvX64RegisterDr6];
+                        let mut out: [Align16<WHV_REGISTER_VALUE>; 1] = unsafe { std::mem::zeroed() };
+                        unsafe {
+                            WHvGetVirtualProcessorRegisters(
+                                self.partition,
+                                0,
+                                names.as_ptr(),
+                                1,
+                                out.as_mut_ptr() as *mut WHV_REGISTER_VALUE,
+                            )
+                            .map_err(|e| RunVcpuError::GetDr6(e.into()))?;
+                        }
+                        unsafe { out[0].0.Reg64 }
+                    };
+
+                    VmExit::Debug {
+                        dr6,
+                        exception: exception.ExceptionType as u32,
+                    }
+                }
+                WHV_RUN_VP_EXIT_REASON(_) => VmExit::Unknown(format!(
+                    "Unknown exit reason '{}'",
+                    exit_context.ExitReason.0
+                )),
+            };
+            return Ok(result);
+        }
     }
 
     fn regs(&self) -> std::result::Result<CommonRegisters, RegisterError> {
@@ -633,6 +786,43 @@ impl VirtualMachine for WhpVm {
     }
 }
 
+#[cfg(feature = "hw-interrupts")]
+impl WhpVm {
+    /// Handle an IO OUT to a hardware emulation port (PIC, PIT, speaker, IO wait).
+    /// Returns true if the port was handled internally.
+    fn handle_hw_io_out(&mut self, port: u16, val: u8) -> bool {
+        // PIC ports
+        if self.pic.handle_io_out(port, val) {
+            return true;
+        }
+
+        // PIT command register
+        if port == 0x43 {
+            self.pit.handle_command(val);
+            return true;
+        }
+
+        // PIT channel 0 data
+        if port == 0x40 {
+            self.pit.handle_data(val);
+            return true;
+        }
+
+        // Speaker port (0x61) -- silently ignore
+        // Equivalent to KVM's KVM_PIT_SPEAKER_DUMMY
+        if port == 0x61 {
+            return true;
+        }
+
+        // IO wait port (0x80) -- silently ignore (timing delay)
+        if port == 0x80 {
+            return true;
+        }
+
+        false
+    }
+}
+
 #[cfg(gdb)]
 impl DebuggableVm for WhpVm {
     fn translate_gva(&self, gva: u64) -> std::result::Result<u64, DebugError> {
@@ -723,7 +913,7 @@ impl DebuggableVm for WhpVm {
             return Ok(());
         }
 
-        // Find the first available LOCAL (L0–L3) slot
+        // Find the first available LOCAL (L0-L3) slot
         let i = (0..MAX_NO_OF_HW_BP)
             .position(|i| regs.dr7 & (1 << (i * 2)) == 0)
             .ok_or(DebugError::TooManyHwBreakpoints(MAX_NO_OF_HW_BP))?;

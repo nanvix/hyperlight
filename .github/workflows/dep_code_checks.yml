@@ -91,6 +91,11 @@ jobs:
           just test-compilation-no-default-features debug
           just test-compilation-no-default-features release
 
+      - name: Run Guest library tests
+        run: |
+          just test-rust-guest debug
+          just test-rust-guest release
+
   windows-checks:
     if: ${{ inputs.docs_only == 'false' }}
     timeout-minutes: 30

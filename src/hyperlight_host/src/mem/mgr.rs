@@ -13,12 +13,16 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
+#[cfg(feature = "init-paging")]
+use std::cmp::Ordering;
+
 use flatbuffers::FlatBufferBuilder;
 use hyperlight_common::flatbuffer_wrappers::function_call::{
     FunctionCall, validate_guest_function_call_buffer,
 };
 use hyperlight_common::flatbuffer_wrappers::function_types::FunctionCallResult;
 use hyperlight_common::flatbuffer_wrappers::guest_log_data::GuestLogData;
+use hyperlight_common::flatbuffer_wrappers::host_function_details::HostFunctionDetails;
 use hyperlight_common::vmem::{self, PAGE_TABLE_SIZE, PageTableEntry, PhysAddr};
 use tracing::{Span, instrument};
 
@@ -27,18 +31,18 @@ use super::memory_region::MemoryRegion;
 use super::ptr::{GuestPtr, RawPtr};
 use super::ptr_offset::Offset;
 use super::shared_mem::{ExclusiveSharedMemory, GuestSharedMemory, HostSharedMemory, SharedMemory};
-use crate::hypervisor::regs::CommonSpecialRegisters;
 use crate::sandbox::snapshot::Snapshot;
-use crate::{Result, new_error};
+use crate::{Result, log_then_return, new_error};
+
+/// The size of stack guard cookies
+pub(crate) const STACK_COOKIE_LEN: usize = 16;
 
 /// A struct that is responsible for laying out and managing the memory
 /// for a given `Sandbox`.
 #[derive(Clone)]
-pub(crate) struct SandboxMemoryManager<S> {
+pub struct SandboxMemoryManager<S> {
     /// Shared memory for the Sandbox
     pub(crate) shared_mem: S,
-    /// Scratch memory for the Sandbox
-    pub(crate) scratch_mem: S,
     /// The memory layout of the underlying shared memory
     pub(crate) layout: SandboxMemoryLayout,
     /// Pointer to where to load memory from
@@ -47,6 +51,8 @@ pub(crate) struct SandboxMemoryManager<S> {
     pub(crate) entrypoint_offset: Option<Offset>,
     /// How many memory regions were mapped after sandbox creation
     pub(crate) mapped_rgns: u64,
+    /// Stack cookie for stack guard verification
+    pub(crate) stack_cookie: [u8; STACK_COOKIE_LEN],
     /// Buffer for accumulating guest abort messages
     pub(crate) abort_buffer: Vec<u8>,
 }
@@ -150,19 +156,25 @@ where
     pub(crate) fn new(
         layout: SandboxMemoryLayout,
         shared_mem: S,
-        scratch_mem: S,
         load_addr: RawPtr,
         entrypoint_offset: Option<Offset>,
+        stack_cookie: [u8; STACK_COOKIE_LEN],
     ) -> Self {
         Self {
             layout,
             shared_mem,
-            scratch_mem,
             load_addr,
             entrypoint_offset,
             mapped_rgns: 0,
+            stack_cookie,
             abort_buffer: Vec::new(),
         }
+    }
+
+    /// Get the stack cookie
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
+    pub(crate) fn get_stack_cookie(&self) -> &[u8; STACK_COOKIE_LEN] {
+        &self.stack_cookie
     }
 
     /// Get mutable access to the abort buffer
@@ -171,8 +183,7 @@ where
     }
 
     /// Get `SharedMemory` in `self` as a mutable reference
-    #[cfg(test)]
-    pub(crate) fn get_shared_mem_mut(&mut self) -> &mut S {
+    pub fn get_shared_mem_mut(&mut self) -> &mut S {
         &mut self.shared_mem
     }
 
@@ -181,21 +192,20 @@ where
         &mut self,
         sandbox_id: u64,
         mapped_regions: Vec<MemoryRegion>,
-        root_pt_gpa: u64,
-        rsp_gva: u64,
-        sregs: CommonSpecialRegisters,
     ) -> Result<Snapshot> {
         Snapshot::new(
             &mut self.shared_mem,
-            &mut self.scratch_mem,
             sandbox_id,
             self.layout,
             crate::mem::exe::LoadInfo::dummy(),
             mapped_regions,
-            root_pt_gpa,
-            rsp_gva,
-            sregs,
         )
+    }
+
+    /// This function restores a memory snapshot from a given snapshot.
+    pub(crate) fn restore_snapshot(&mut self, snapshot: &Snapshot) -> Result<()> {
+        self.shared_mem.restore_from_snapshot(snapshot)?;
+        Ok(())
     }
 }
 
@@ -204,17 +214,53 @@ impl SandboxMemoryManager<ExclusiveSharedMemory> {
         let layout = *s.layout();
         let mut shared_mem = ExclusiveSharedMemory::new(s.mem_size())?;
         shared_mem.copy_from_slice(s.memory(), 0)?;
-        let scratch_mem = ExclusiveSharedMemory::new(s.layout().get_scratch_size())?;
         let load_addr: RawPtr = RawPtr::try_from(layout.get_guest_code_address())?;
+        let stack_cookie = rand::random::<[u8; STACK_COOKIE_LEN]>();
         let entrypoint_gva = s.preinitialise();
         let entrypoint_offset = entrypoint_gva.map(|x| (x - u64::from(&load_addr)).into());
         Ok(Self::new(
             layout,
             shared_mem,
-            scratch_mem,
             load_addr,
             entrypoint_offset,
+            stack_cookie,
         ))
+    }
+
+    /// Writes host function details to memory
+    #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
+    pub(crate) fn write_buffer_host_function_details(&mut self, buffer: &[u8]) -> Result<()> {
+        let host_function_details = HostFunctionDetails::try_from(buffer).map_err(|e| {
+            new_error!(
+                "write_buffer_host_function_details: failed to convert buffer to HostFunctionDetails: {}",
+                e
+            )
+        })?;
+
+        let host_function_call_buffer: Vec<u8> = (&host_function_details).try_into().map_err(|_| {
+            new_error!(
+                "write_buffer_host_function_details: failed to convert HostFunctionDetails to Vec<u8>"
+            )
+        })?;
+
+        let buffer_size = {
+            let size_u64 = self
+                .shared_mem
+                .read_u64(self.layout.get_host_function_definitions_size_offset())?;
+            usize::try_from(size_u64)
+        }?;
+
+        if host_function_call_buffer.len() > buffer_size {
+            log_then_return!(
+                "Host Function Details buffer is too big for the host_function_definitions buffer"
+            );
+        }
+
+        self.shared_mem.copy_from_slice(
+            host_function_call_buffer.as_slice(),
+            self.layout.host_function_definitions_buffer_offset,
+        )?;
+        Ok(())
     }
 
     /// Write memory layout
@@ -228,50 +274,79 @@ impl SandboxMemoryManager<ExclusiveSharedMemory> {
         )
     }
 
+    /// Write init data
+    #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
+    pub(crate) fn write_init_data(&mut self, user_memory: &[u8]) -> Result<()> {
+        self.layout
+            .write_init_data(self.shared_mem.as_mut_slice(), user_memory)?;
+        Ok(())
+    }
+
+    /// Get the value of guest credits.
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
+    pub fn get_guest_credits_offset(&self) -> usize {
+        self.layout.get_credits_value_offset()
+    }
+
     /// Wraps ExclusiveSharedMemory::build
-    // Morally, this should not have to be a Result: this operation is
-    // infallible. The source of the Result is
-    // update_scratch_bookkeeping(), which calls functions that can
-    // fail due to bounds checks (which are statically known to be ok
-    // in this situation) or due to failing to take the scratch shared
-    // memory lock, but the scratch shared memory is built in this
-    // function, its lock does not escape before the end of the
-    // function, and the lock is taken by no other code path, so we
-    // know it is not contended.
     pub fn build(
         self,
-    ) -> Result<(
+    ) -> (
         SandboxMemoryManager<HostSharedMemory>,
         SandboxMemoryManager<GuestSharedMemory>,
-    )> {
+    ) {
         let (hshm, gshm) = self.shared_mem.build();
-        let (hscratch, gscratch) = self.scratch_mem.build();
-        let mut host_mgr = SandboxMemoryManager {
-            shared_mem: hshm,
-            scratch_mem: hscratch,
-            layout: self.layout,
-            load_addr: self.load_addr.clone(),
-            entrypoint_offset: self.entrypoint_offset,
-            mapped_rgns: self.mapped_rgns,
-            abort_buffer: self.abort_buffer,
-        };
-        let guest_mgr = SandboxMemoryManager {
-            shared_mem: gshm,
-            scratch_mem: gscratch,
-            layout: self.layout,
-            load_addr: self.load_addr.clone(),
-            entrypoint_offset: self.entrypoint_offset,
-            mapped_rgns: self.mapped_rgns,
-            abort_buffer: Vec::new(), // Guest doesn't need abort buffer
-        };
-        host_mgr.update_scratch_bookkeeping(
-            (SandboxMemoryLayout::BASE_ADDRESS + self.layout.get_pt_offset()) as u64,
-        )?;
-        Ok((host_mgr, guest_mgr))
+        (
+            SandboxMemoryManager {
+                shared_mem: hshm,
+                layout: self.layout,
+                load_addr: self.load_addr.clone(),
+                entrypoint_offset: self.entrypoint_offset,
+                mapped_rgns: self.mapped_rgns,
+                stack_cookie: self.stack_cookie,
+                abort_buffer: self.abort_buffer,
+            },
+            SandboxMemoryManager {
+                shared_mem: gshm,
+                layout: self.layout,
+                load_addr: self.load_addr.clone(),
+                entrypoint_offset: self.entrypoint_offset,
+                mapped_rgns: self.mapped_rgns,
+                stack_cookie: self.stack_cookie,
+                abort_buffer: Vec::new(), // Guest doesn't need abort buffer
+            },
+        )
     }
 }
 
 impl SandboxMemoryManager<HostSharedMemory> {
+    /// Check the stack guard of the memory in `shared_mem`, using
+    /// `layout` to calculate its location.
+    ///
+    /// Return `true`
+    /// if `shared_mem` could be accessed properly and the guard
+    /// matches `cookie`. If it could be accessed properly and the
+    /// guard doesn't match `cookie`, return `false`. Otherwise, return
+    /// a descriptive error.
+    ///
+    /// This method could be an associated function instead. See
+    /// documentation at the bottom `set_stack_guard` for description
+    /// of why it isn't.
+    #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
+    #[cfg(feature = "init-paging")]
+    pub(crate) fn check_stack_guard(&self) -> Result<bool> {
+        let expected = self.stack_cookie;
+        let offset = self.layout.get_top_of_user_stack_offset();
+        let actual: [u8; STACK_COOKIE_LEN] = self.shared_mem.read(offset)?;
+        let cmp_res = expected.iter().cmp(actual.iter());
+        Ok(cmp_res == Ordering::Equal)
+    }
+
+    #[cfg(not(feature = "init-paging"))]
+    pub(crate) fn check_stack_guard(&self) -> Result<bool> {
+        Ok(true)
+    }
+
     /// Get the address of the dispatch function in memory
     #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
     pub(crate) fn get_pointer_to_dispatch_function(&self) -> Result<u64> {
@@ -366,63 +441,6 @@ impl SandboxMemoryManager<HostSharedMemory> {
                 break;
             };
         }
-    }
-
-    /// This function restores a memory snapshot from a given snapshot.
-    pub(crate) fn restore_snapshot(
-        &mut self,
-        snapshot: &Snapshot,
-    ) -> Result<(Option<GuestSharedMemory>, Option<GuestSharedMemory>)> {
-        let gsnapshot = if self.shared_mem.mem_size() == snapshot.mem_size() {
-            None
-        } else {
-            let new_snapshot_mem = ExclusiveSharedMemory::new(snapshot.mem_size())?;
-            let (hsnapshot, gsnapshot) = new_snapshot_mem.build();
-            self.shared_mem = hsnapshot;
-            Some(gsnapshot)
-        };
-        self.shared_mem.restore_from_snapshot(snapshot)?;
-        let new_scratch_size = snapshot.layout().get_scratch_size();
-        let gscratch = if new_scratch_size == self.scratch_mem.mem_size() {
-            self.scratch_mem.zero()?;
-            None
-        } else {
-            let new_scratch_mem = ExclusiveSharedMemory::new(new_scratch_size)?;
-            let (hscratch, gscratch) = new_scratch_mem.build();
-            // Even though this destroys the reference to the host
-            // side of the old scratch mapping, the VM should still
-            // own the reference to the guest side of the old scratch
-            // mapping, so it won't actually be deallocated until it
-            // has been unmapped from the VM.
-            self.scratch_mem = hscratch;
-
-            Some(gscratch)
-        };
-        self.update_scratch_bookkeeping(snapshot.root_pt_gpa())?;
-        Ok((gsnapshot, gscratch))
-    }
-
-    fn update_scratch_bookkeeping(&mut self, snapshot_pt_base_gpa: u64) -> Result<()> {
-        let scratch_size = self.scratch_mem.mem_size();
-
-        let size_offset =
-            scratch_size - hyperlight_common::layout::SCRATCH_TOP_SIZE_OFFSET as usize;
-        self.scratch_mem
-            .write::<u64>(size_offset, scratch_size as u64)?;
-
-        let alloc_offset =
-            scratch_size - hyperlight_common::layout::SCRATCH_TOP_ALLOCATOR_OFFSET as usize;
-        self.scratch_mem.write::<u64>(
-            alloc_offset,
-            hyperlight_common::layout::scratch_base_gpa(scratch_size),
-        )?;
-
-        let snapshot_pt_base_gpa_offset = scratch_size
-            - hyperlight_common::layout::SCRATCH_TOP_SNAPSHOT_PT_GPA_BASE_OFFSET as usize;
-        self.scratch_mem
-            .write::<u64>(snapshot_pt_base_gpa_offset, snapshot_pt_base_gpa)?;
-
-        Ok(())
     }
 }
 

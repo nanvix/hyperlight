@@ -1,0 +1,52 @@
+# Example HyperlightFS configuration with FAT mounts
+#
+# This demonstrates all the configuration options available for HyperlightFS,
+# including both read-only file mappings and read-write FAT mounts.
+#
+# Validate with:
+#   cargo run --example hyperlight_fs_validate -- examples/assets/hyperlight-fs-example.toml
+
+# ============================================================================
+# Read-Only File Mappings
+# ============================================================================
+# These map individual files from the host into the guest filesystem.
+# The files are read-only in the guest.
+# Note: host_path must be an absolute path
+
+# Uncomment and set to an actual file path on your system:
+# [[file]]
+# host_path = "/etc/hostname"
+# guest = "/config/hostname"
+
+# ============================================================================
+# FAT Image Mounts (Existing FAT images)
+# ============================================================================
+# Mount an existing FAT image file into the guest.
+# The image provides read-write access.
+
+# [[fat_image]]
+# host_path = "/path/to/existing.fat"
+# mount_point = "/existing"
+
+# ============================================================================
+# FAT Mounts (Create new FAT filesystems)
+# ============================================================================
+# Create a new FAT filesystem and mount it into the guest.
+# These provide read-write access.
+
+# Persistent FAT mount - file persists after sandbox is dropped
+[[fat_mount]]
+host_path = "/tmp/hyperlight-logs.fat"
+mount_point = "/logs"
+size = "10MB"
+
+# Temporary FAT mount - automatically deleted when sandbox drops
+[[fat_mount]]
+mount_point = "/tmp"
+size = "5MB"
+
+# Larger FAT mount for data storage
+[[fat_mount]]
+host_path = "/tmp/hyperlight-data.fat"
+mount_point = "/data"
+size = "50MB"

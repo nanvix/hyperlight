@@ -22,5 +22,6 @@ extern crate alloc;
 pub mod dispatch;
 pub mod error;
 pub mod flatbuffer;
+pub mod fs;
 pub mod logging;
 pub mod types;
