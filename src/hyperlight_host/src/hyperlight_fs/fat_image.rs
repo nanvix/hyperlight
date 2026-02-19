@@ -595,6 +595,16 @@ impl FatImage {
         self.mmap_ptr
     }
 
+    /// Get the raw file descriptor for the backing file.
+    ///
+    /// This is used by the sandbox to create a `MAP_PRIVATE` CoW mapping
+    /// of the FAT image for MSHV v4 compatibility (which requires writable
+    /// host pages for `pin_user_pages_fast`).
+    pub(crate) fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
+        use std::os::unix::io::AsRawFd;
+        self._file.as_raw_fd()
+    }
+
     /// Get the size of the FAT image in bytes.
     ///
     /// This is the total size of the mmap'd region, which equals the size

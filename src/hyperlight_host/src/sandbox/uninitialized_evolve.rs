@@ -262,19 +262,45 @@ fn wire_hyperlight_fs(
     // Unlike read-only file mappings above, FAT mounts are writable filesystems -
     // the guest can create, modify, and delete files within them, and changes
     // persist to the backing storage (file or anonymous memory).
+    //
+    // NOTE: We create a MAP_PRIVATE CoW mapping of the FAT file rather than
+    // using the MAP_SHARED pointer directly because MSHV v4's
+    // pin_user_pages_fast(FOLL_WRITE) fails on MAP_SHARED file-backed pages
+    // with EFAULT. MAP_PRIVATE with PROT_WRITE gives us CoW pages that the
+    // hypervisor can pin successfully.
     for fat_mount in fs_image.fat_mounts() {
-        let fat_ptr = fat_mount.image().as_ptr();
+        let fat_fd = fat_mount.image().as_raw_fd();
         let fat_size = fat_mount.image().size();
         let page_size = page_size::get();
         let fat_size_aligned = (fat_size + page_size - 1) & !(page_size - 1);
 
-        unsafe {
+        let cow_ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                fat_size_aligned,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE,
+                fat_fd,
+                0,
+            )
+        };
+        if cow_ptr == libc::MAP_FAILED {
+            return Err(crate::HyperlightError::Error(format!(
+                "mmap error for FAT mount: {:?}",
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        if let Err(err) = unsafe {
             vm.map_region(&MemoryRegion {
-                host_region: fat_ptr as usize..fat_ptr as usize + fat_size_aligned,
+                host_region: cow_ptr as usize..cow_ptr as usize + fat_size_aligned,
                 guest_region: current_addr as usize..current_addr as usize + fat_size_aligned,
                 flags: MemoryRegionFlags::READ | MemoryRegionFlags::WRITE,
                 region_type: MemoryRegionType::HyperlightFS,
-            })?;
+            })
+        } {
+            unsafe { libc::munmap(cow_ptr, fat_size_aligned) };
+            return Err(err);
         }
 
         info!(
