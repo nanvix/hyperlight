@@ -19,8 +19,6 @@ use std::sync::LazyLock;
 #[cfg(gdb)]
 use kvm_bindings::kvm_guest_debug;
 use kvm_bindings::{KVM_MAX_CPUID_ENTRIES, kvm_fpu, kvm_regs, kvm_sregs, kvm_userspace_memory_region};
-#[cfg(feature = "pv-timer")]
-use kvm_bindings::kvm_vcpu_events;
 use kvm_ioctls::Cap::UserMemory;
 use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
 use tracing::{Span, instrument};
@@ -29,9 +27,7 @@ use tracing::{Span, instrument};
 use crate::hypervisor::gdb::DebuggableVm;
 use crate::hypervisor::{HyperlightExit, Hypervisor};
 #[cfg(feature = "pv-timer")]
-use crate::hypervisor::pic_pit::Pic;
-#[cfg(feature = "pv-timer")]
-use crate::hypervisor::pv_timer::{PvTimer, PV_TIMER_PORT};
+use crate::hypervisor::pv_timer::PV_TIMER_PORT;
 use crate::mem::memory_region::MemoryRegion;
 use crate::{Result, new_error};
 
@@ -66,11 +62,6 @@ pub(crate) struct KvmVm {
     // KVM as opposed to mshv/whp has no way to get current debug regs, so need to keep a copy here
     #[cfg(gdb)]
     debug_regs: kvm_guest_debug,
-
-    #[cfg(feature = "pv-timer")]
-    pic: Pic,
-    #[cfg(feature = "pv-timer")]
-    pv_timer: Option<PvTimer>,
 }
 
 static KVM: LazyLock<Result<Kvm>> =
@@ -85,7 +76,7 @@ impl KvmVm {
             .map_err(|e| new_error!("Failed to create KVM instance: {}", e))?;
 
         cfg_if::cfg_if! {
-            if #[cfg(all(feature = "hw-interrupts", not(feature = "pv-timer")))] {
+            if #[cfg(feature = "hw-interrupts")] {
                 if !hv.check_extension(kvm_ioctls::Cap::Irqchip) {
                     crate::log_then_return!("KVM does not support KVM_CAP_IRQCHIP");
                 }
@@ -100,7 +91,7 @@ impl KvmVm {
         let mut vm_fd = hv.create_vm_with_type(0)?;
 
         cfg_if::cfg_if! {
-            if #[cfg(all(feature = "hw-interrupts", not(feature = "pv-timer")))] {
+            if #[cfg(feature = "hw-interrupts")] {
                 vm_fd.create_irq_chip()?;
 
                 // Enable the emulation of a dummy speaker port stub so that writing to port 0x61
@@ -138,10 +129,6 @@ impl KvmVm {
             vcpu_fd,
             #[cfg(gdb)]
             debug_regs: kvm_guest_debug::default(),
-            #[cfg(feature = "pv-timer")]
-            pic: Pic::new(),
-            #[cfg(feature = "pv-timer")]
-            pv_timer: None,
         })
     }
 }
@@ -168,68 +155,32 @@ impl Hypervisor for KvmVm {
     fn run_vcpu(&mut self) -> Result<HyperlightExit> {
         cfg_if::cfg_if! {
             if #[cfg(feature = "pv-timer")] {
+                // With pv-timer on KVM, we keep the in-kernel irqchip + PIT.
+                // Port 0x500 writes reprogram the in-kernel PIT to the requested rate.
+                // PIC IO ports are handled in-kernel by the irqchip (no userspace emulation).
                 loop {
-                    // Before each vCPU entry, check if a timer tick is due and inject
-                    // an interrupt via kvm_vcpu_events.
-                    if let Some(ref mut pv_timer) = self.pv_timer {
-                        if pv_timer.check_tick() {
-                            let vector = self.pic.master_vector_base();
-                            let mut events = kvm_vcpu_events::default();
-                            events.interrupt.injected = 1;
-                            events.interrupt.nr = vector;
-                            events.interrupt.soft = 0;
-                            self.vcpu_fd.set_vcpu_events(&events)?;
-                        }
-                    }
-
                     match self.vcpu_fd.run() {
-                        Ok(VcpuExit::Hlt) => {
-                            if let Some(ref mut pv_timer) = self.pv_timer {
-                                pv_timer.sleep_until_tick();
-                                let vector = self.pic.master_vector_base();
-                                let mut events = kvm_vcpu_events::default();
-                                events.interrupt.injected = 1;
-                                events.interrupt.nr = vector;
-                                events.interrupt.soft = 0;
-                                self.vcpu_fd.set_vcpu_events(&events)?;
-                                continue;
-                            }
-                            return Ok(HyperlightExit::Halt());
-                        }
+                        Ok(VcpuExit::Hlt) => return Ok(HyperlightExit::Halt()),
                         Ok(VcpuExit::IoOut(port, data)) => {
-                            // PV timer port: 32-bit write
                             if port == PV_TIMER_PORT && data.len() >= 4 {
                                 let period_us = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-                                self.pv_timer = PvTimer::new(period_us);
-                                continue;
-                            }
-                            // PIC ports
-                            if self.pic.handle_io_out(port, data[0]) {
-                                continue;
-                            }
-                            // Speaker port (0x61) -- silently ignore
-                            if port == 0x61 {
-                                continue;
-                            }
-                            // IO wait port (0x80) -- silently ignore
-                            if port == 0x80 {
-                                continue;
-                            }
-                            // PIT ports -- silently ignore (guest shouldn't use them with pv-timer)
-                            if port == 0x43 || port == 0x40 {
-                                continue;
-                            }
-                            return Ok(HyperlightExit::IoOut(port, data.to_vec()));
-                        }
-                        Ok(VcpuExit::IoIn(port, data)) => {
-                            // PIC IO IN
-                            if let Some(val) = self.pic.handle_io_in(port) {
-                                if !data.is_empty() {
-                                    data[0] = val;
+                                if period_us > 0 {
+                                    // PIT base frequency = 1193182 Hz
+                                    // divisor = base_freq * period_us / 1_000_000
+                                    let divisor = ((1_193_182u64 * period_us as u64) / 1_000_000)
+                                        .max(1)
+                                        .min(65535) as u32;
+                                    let mut pit_state = self.vm_fd.get_pit2()?;
+                                    pit_state.channels[0].count = divisor;
+                                    pit_state.channels[0].mode = 2; // rate generator
+                                    pit_state.channels[0].rw_mode = 3; // lobyte/hibyte
+                                    pit_state.channels[0].gate = 1;
+                                    pit_state.channels[0].count_load_time = 0;
+                                    self.vm_fd.set_pit2(&pit_state)?;
                                 }
                                 continue;
                             }
-                            return Ok(HyperlightExit::IoIn(port, data.len() as u8));
+                            return Ok(HyperlightExit::IoOut(port, data.to_vec()));
                         }
                         Ok(VcpuExit::MmioRead(addr, _)) => return Ok(HyperlightExit::MmioRead(addr)),
                         Ok(VcpuExit::MmioWrite(addr, _)) => return Ok(HyperlightExit::MmioWrite(addr)),
