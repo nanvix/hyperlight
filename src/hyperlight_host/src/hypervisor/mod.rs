@@ -30,6 +30,10 @@ pub(crate) mod hyperv_windows;
 #[cfg(feature = "hw-interrupts")]
 pub(crate) mod pic_pit;
 
+/// Paravirtualized timer
+#[cfg(feature = "pv-timer")]
+pub(crate) mod pv_timer;
+
 /// GDB debugging support
 #[cfg(gdb)]
 pub(crate) mod gdb;

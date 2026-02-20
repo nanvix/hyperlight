@@ -19,6 +19,8 @@ use std::sync::LazyLock;
 #[cfg(gdb)]
 use kvm_bindings::kvm_guest_debug;
 use kvm_bindings::{KVM_MAX_CPUID_ENTRIES, kvm_fpu, kvm_regs, kvm_sregs, kvm_userspace_memory_region};
+#[cfg(feature = "pv-timer")]
+use kvm_bindings::kvm_vcpu_events;
 use kvm_ioctls::Cap::UserMemory;
 use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
 use tracing::{Span, instrument};
@@ -26,6 +28,10 @@ use tracing::{Span, instrument};
 #[cfg(gdb)]
 use crate::hypervisor::gdb::DebuggableVm;
 use crate::hypervisor::{HyperlightExit, Hypervisor};
+#[cfg(feature = "pv-timer")]
+use crate::hypervisor::pic_pit::Pic;
+#[cfg(feature = "pv-timer")]
+use crate::hypervisor::pv_timer::{PvTimer, PV_TIMER_PORT};
 use crate::mem::memory_region::MemoryRegion;
 use crate::{Result, new_error};
 
@@ -60,6 +66,11 @@ pub(crate) struct KvmVm {
     // KVM as opposed to mshv/whp has no way to get current debug regs, so need to keep a copy here
     #[cfg(gdb)]
     debug_regs: kvm_guest_debug,
+
+    #[cfg(feature = "pv-timer")]
+    pic: Pic,
+    #[cfg(feature = "pv-timer")]
+    pv_timer: Option<PvTimer>,
 }
 
 static KVM: LazyLock<Result<Kvm>> =
@@ -74,7 +85,7 @@ impl KvmVm {
             .map_err(|e| new_error!("Failed to create KVM instance: {}", e))?;
 
         cfg_if::cfg_if! {
-            if #[cfg(feature = "hw-interrupts")] {
+            if #[cfg(all(feature = "hw-interrupts", not(feature = "pv-timer")))] {
                 if !hv.check_extension(kvm_ioctls::Cap::Irqchip) {
                     crate::log_then_return!("KVM does not support KVM_CAP_IRQCHIP");
                 }
@@ -89,7 +100,7 @@ impl KvmVm {
         let mut vm_fd = hv.create_vm_with_type(0)?;
 
         cfg_if::cfg_if! {
-            if #[cfg(feature = "hw-interrupts")] {
+            if #[cfg(all(feature = "hw-interrupts", not(feature = "pv-timer")))] {
                 vm_fd.create_irq_chip()?;
 
                 // Enable the emulation of a dummy speaker port stub so that writing to port 0x61
@@ -127,6 +138,10 @@ impl KvmVm {
             vcpu_fd,
             #[cfg(gdb)]
             debug_regs: kvm_guest_debug::default(),
+            #[cfg(feature = "pv-timer")]
+            pic: Pic::new(),
+            #[cfg(feature = "pv-timer")]
+            pv_timer: None,
         })
     }
 }
@@ -151,29 +166,117 @@ impl Hypervisor for KvmVm {
     }
 
     fn run_vcpu(&mut self) -> Result<HyperlightExit> {
-        match self.vcpu_fd.run() {
-            Ok(VcpuExit::Hlt) => Ok(HyperlightExit::Halt()),
-            Ok(VcpuExit::IoOut(port, data)) => Ok(HyperlightExit::IoOut(port, data.to_vec())),
-            Ok(VcpuExit::MmioRead(addr, _)) => Ok(HyperlightExit::MmioRead(addr)),
-            Ok(VcpuExit::MmioWrite(addr, _)) => Ok(HyperlightExit::MmioWrite(addr)),
-            #[cfg(gdb)]
-            Ok(VcpuExit::Debug(debug_exit)) => Ok(HyperlightExit::Debug {
-                dr6: debug_exit.dr6,
-                exception: debug_exit.exception,
-            }),
-            Err(e) => match e.errno() {
-                // InterruptHandle::kill() sends a signal (SIGRTMIN+offset) to interrupt the vcpu, which causes EINTR
-                libc::EINTR => Ok(HyperlightExit::Cancelled()),
-                libc::EAGAIN => Ok(HyperlightExit::Retry()),
-                _ => Ok(HyperlightExit::Unknown(format!(
-                    "Unknown KVM VCPU error: {}",
-                    e
-                ))),
-            },
-            Ok(other) => Ok(HyperlightExit::Unknown(format!(
-                "Unknown KVM VCPU exit: {:?}",
-                other
-            ))),
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "pv-timer")] {
+                loop {
+                    // Before each vCPU entry, check if a timer tick is due and inject
+                    // an interrupt via kvm_vcpu_events.
+                    if let Some(ref mut pv_timer) = self.pv_timer {
+                        if pv_timer.check_tick() {
+                            let vector = self.pic.master_vector_base();
+                            let mut events = kvm_vcpu_events::default();
+                            events.interrupt.injected = 1;
+                            events.interrupt.nr = vector;
+                            events.interrupt.soft = 0;
+                            self.vcpu_fd.set_vcpu_events(&events)?;
+                        }
+                    }
+
+                    match self.vcpu_fd.run() {
+                        Ok(VcpuExit::Hlt) => {
+                            if let Some(ref mut pv_timer) = self.pv_timer {
+                                pv_timer.sleep_until_tick();
+                                let vector = self.pic.master_vector_base();
+                                let mut events = kvm_vcpu_events::default();
+                                events.interrupt.injected = 1;
+                                events.interrupt.nr = vector;
+                                events.interrupt.soft = 0;
+                                self.vcpu_fd.set_vcpu_events(&events)?;
+                                continue;
+                            }
+                            return Ok(HyperlightExit::Halt());
+                        }
+                        Ok(VcpuExit::IoOut(port, data)) => {
+                            // PV timer port: 32-bit write
+                            if port == PV_TIMER_PORT && data.len() >= 4 {
+                                let period_us = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+                                self.pv_timer = PvTimer::new(period_us);
+                                continue;
+                            }
+                            // PIC ports
+                            if self.pic.handle_io_out(port, data[0]) {
+                                continue;
+                            }
+                            // Speaker port (0x61) -- silently ignore
+                            if port == 0x61 {
+                                continue;
+                            }
+                            // IO wait port (0x80) -- silently ignore
+                            if port == 0x80 {
+                                continue;
+                            }
+                            // PIT ports -- silently ignore (guest shouldn't use them with pv-timer)
+                            if port == 0x43 || port == 0x40 {
+                                continue;
+                            }
+                            return Ok(HyperlightExit::IoOut(port, data.to_vec()));
+                        }
+                        Ok(VcpuExit::IoIn(port, data)) => {
+                            // PIC IO IN
+                            if let Some(val) = self.pic.handle_io_in(port) {
+                                if !data.is_empty() {
+                                    data[0] = val;
+                                }
+                                continue;
+                            }
+                            return Ok(HyperlightExit::IoIn(port, data.len() as u8));
+                        }
+                        Ok(VcpuExit::MmioRead(addr, _)) => return Ok(HyperlightExit::MmioRead(addr)),
+                        Ok(VcpuExit::MmioWrite(addr, _)) => return Ok(HyperlightExit::MmioWrite(addr)),
+                        #[cfg(gdb)]
+                        Ok(VcpuExit::Debug(debug_exit)) => return Ok(HyperlightExit::Debug {
+                            dr6: debug_exit.dr6,
+                            exception: debug_exit.exception,
+                        }),
+                        Err(e) => match e.errno() {
+                            libc::EINTR => return Ok(HyperlightExit::Cancelled()),
+                            libc::EAGAIN => continue,
+                            _ => return Ok(HyperlightExit::Unknown(format!(
+                                "Unknown KVM VCPU error: {}",
+                                e
+                            ))),
+                        },
+                        Ok(other) => return Ok(HyperlightExit::Unknown(format!(
+                            "Unknown KVM VCPU exit: {:?}",
+                            other
+                        ))),
+                    }
+                }
+            } else {
+                match self.vcpu_fd.run() {
+                    Ok(VcpuExit::Hlt) => Ok(HyperlightExit::Halt()),
+                    Ok(VcpuExit::IoOut(port, data)) => Ok(HyperlightExit::IoOut(port, data.to_vec())),
+                    Ok(VcpuExit::MmioRead(addr, _)) => Ok(HyperlightExit::MmioRead(addr)),
+                    Ok(VcpuExit::MmioWrite(addr, _)) => Ok(HyperlightExit::MmioWrite(addr)),
+                    #[cfg(gdb)]
+                    Ok(VcpuExit::Debug(debug_exit)) => Ok(HyperlightExit::Debug {
+                        dr6: debug_exit.dr6,
+                        exception: debug_exit.exception,
+                    }),
+                    Err(e) => match e.errno() {
+                        libc::EINTR => Ok(HyperlightExit::Cancelled()),
+                        libc::EAGAIN => Ok(HyperlightExit::Retry()),
+                        _ => Ok(HyperlightExit::Unknown(format!(
+                            "Unknown KVM VCPU error: {}",
+                            e
+                        ))),
+                    },
+                    Ok(other) => Ok(HyperlightExit::Unknown(format!(
+                        "Unknown KVM VCPU exit: {:?}",
+                        other
+                    ))),
+                }
+            }
         }
     }
 

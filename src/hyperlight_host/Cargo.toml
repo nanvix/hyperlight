@@ -139,6 +139,7 @@ fuzzing = ["hyperlight-common/fuzzing"]
 build-metadata = ["dep:built"]
 init-paging = []
 hw-interrupts = []
+pv-timer = ["hw-interrupts"]
 
 [[bench]]
 name = "benchmarks"

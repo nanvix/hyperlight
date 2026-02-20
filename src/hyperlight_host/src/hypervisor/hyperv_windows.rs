@@ -38,6 +38,8 @@ use crate::hypervisor::regs::{CommonFpu, CommonRegisters, CommonSpecialRegisters
 use crate::hypervisor::{HyperlightExit, Hypervisor};
 #[cfg(feature = "hw-interrupts")]
 use crate::hypervisor::pic_pit::{Pic, Pit};
+#[cfg(feature = "pv-timer")]
+use crate::hypervisor::pv_timer::{PvTimer, PV_TIMER_PORT};
 use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
 use crate::{Result, log_then_return, new_error};
 
@@ -77,10 +79,12 @@ pub(crate) struct WhpVm {
     initial_memory_setup_done: bool,
     #[cfg(feature = "hw-interrupts")]
     pic: Pic,
-    #[cfg(feature = "hw-interrupts")]
+    #[cfg(all(feature = "hw-interrupts", not(feature = "pv-timer")))]
     pit: Pit,
-    #[cfg(feature = "hw-interrupts")]
+    #[cfg(all(feature = "hw-interrupts", not(feature = "pv-timer")))]
     last_tick: Instant,
+    #[cfg(feature = "pv-timer")]
+    pv_timer: Option<PvTimer>,
 }
 
 // Safety: `WhpVm` is !Send because it holds `SurrogateProcess` which contains a raw pointer
@@ -117,10 +121,12 @@ impl WhpVm {
             initial_memory_setup_done: false,
             #[cfg(feature = "hw-interrupts")]
             pic: Pic::new(),
-            #[cfg(feature = "hw-interrupts")]
+            #[cfg(all(feature = "hw-interrupts", not(feature = "pv-timer")))]
             pit: Pit::new(),
-            #[cfg(feature = "hw-interrupts")]
+            #[cfg(all(feature = "hw-interrupts", not(feature = "pv-timer")))]
             last_tick: Instant::now(),
+            #[cfg(feature = "pv-timer")]
+            pv_timer: None,
         })
     }
 
@@ -227,7 +233,7 @@ impl Hypervisor for WhpVm {
             // --- Timer injection (hw-interrupts only) ---
             // Before each vCPU entry, check if a timer tick is due and the guest
             // can accept interrupts (IF=1), then inject via WHvRegisterPendingInterruption.
-            #[cfg(feature = "hw-interrupts")]
+            #[cfg(all(feature = "hw-interrupts", not(feature = "pv-timer")))]
             if let Some(period) = self.pit.period() {
                 let elapsed = self.last_tick.elapsed();
                 if elapsed >= period {
@@ -253,6 +259,37 @@ impl Hypervisor for WhpVm {
                         self.last_tick = Instant::now();
                         let vector = self.pic.master_vector_base() as u64;
                         // Format: bit 31 = valid, bits 10:8 = type (0 = external), bits 7:0 = vector
+                        let pending = vector | (1u64 << 31);
+                        self.set_registers(&[(
+                            WHvRegisterPendingInterruption,
+                            Align16(WHV_REGISTER_VALUE { Reg64: pending }),
+                        )])?;
+                    }
+                }
+            }
+            #[cfg(feature = "pv-timer")]
+            if let Some(ref mut pv_timer) = self.pv_timer {
+                if pv_timer.check_tick() {
+                    // Read RFLAGS to check if interrupts are enabled (IF = bit 9).
+                    let rflags = {
+                        let names = [WHvX64RegisterRflags];
+                        let mut values: [Align16<WHV_REGISTER_VALUE>; 1] =
+                            unsafe { std::mem::zeroed() };
+                        unsafe {
+                            WHvGetVirtualProcessorRegisters(
+                                self.partition,
+                                0,
+                                names.as_ptr(),
+                                1,
+                                values.as_mut_ptr() as *mut WHV_REGISTER_VALUE,
+                            )?;
+                            values[0].0.Reg64
+                        }
+                    };
+                    let interrupts_enabled = rflags & (1 << 9) != 0;
+
+                    if interrupts_enabled {
+                        let vector = self.pic.master_vector_base() as u64;
                         let pending = vector | (1u64 << 31);
                         self.set_registers(&[(
                             WHvRegisterPendingInterruption,
@@ -298,8 +335,20 @@ impl Hypervisor for WhpVm {
                         };
                         let data_val = rax & mask;
 
-                        #[cfg(feature = "hw-interrupts")]
+                        // PV timer port: 32-bit write
+                        #[cfg(feature = "pv-timer")]
+                        if port == PV_TIMER_PORT {
+                            self.pv_timer = PvTimer::new(data_val as u32);
+                            continue;
+                        }
+
+                        #[cfg(all(feature = "hw-interrupts", not(feature = "pv-timer")))]
                         if self.handle_hw_io_out(port, data_val as u8) {
+                            continue; // re-enter vCPU
+                        }
+
+                        #[cfg(feature = "pv-timer")]
+                        if self.handle_pv_io_out(port, data_val as u8) {
                             continue; // re-enter vCPU
                         }
 
@@ -332,13 +381,24 @@ impl Hypervisor for WhpVm {
                     // When hw-interrupts are enabled and the PIT is configured,
                     // HLT means "wait for the next interrupt". Sleep until the
                     // next timer tick, inject the interrupt, and re-enter.
-                    #[cfg(feature = "hw-interrupts")]
+                    #[cfg(all(feature = "hw-interrupts", not(feature = "pv-timer")))]
                     if let Some(period) = self.pit.period() {
                         let elapsed = self.last_tick.elapsed();
                         if elapsed < period {
                             std::thread::sleep(period - elapsed);
                         }
                         self.last_tick = Instant::now();
+                        let vector = self.pic.master_vector_base() as u64;
+                        let pending = vector | (1u64 << 31);
+                        self.set_registers(&[(
+                            WHvRegisterPendingInterruption,
+                            Align16(WHV_REGISTER_VALUE { Reg64: pending }),
+                        )])?;
+                        continue; // re-enter vCPU
+                    }
+                    #[cfg(feature = "pv-timer")]
+                    if let Some(ref mut pv_timer) = self.pv_timer {
+                        pv_timer.sleep_until_tick();
                         let vector = self.pic.master_vector_base() as u64;
                         let pending = vector | (1u64 << 31);
                         self.set_registers(&[(
@@ -564,7 +624,7 @@ impl Hypervisor for WhpVm {
     }
 }
 
-#[cfg(feature = "hw-interrupts")]
+#[cfg(all(feature = "hw-interrupts", not(feature = "pv-timer")))]
 impl WhpVm {
     /// Handle an IO OUT to a hardware emulation port (PIC, PIT, speaker, IO wait).
     /// Returns true if the port was handled internally.
@@ -588,6 +648,36 @@ impl WhpVm {
 
         // Speaker port (0x61) -- silently ignore
         // Equivalent to KVM's KVM_PIT_SPEAKER_DUMMY
+        if port == 0x61 {
+            return true;
+        }
+
+        // IO wait port (0x80) -- silently ignore (timing delay)
+        if port == 0x80 {
+            return true;
+        }
+
+        false
+    }
+}
+
+#[cfg(feature = "pv-timer")]
+impl WhpVm {
+    /// Handle an IO OUT to a hardware emulation port (PIC, speaker, IO wait).
+    /// PIT ports are silently ignored with PV timer. PV timer port is handled inline.
+    /// Returns true if the port was handled internally.
+    fn handle_pv_io_out(&mut self, port: u16, val: u8) -> bool {
+        // PIC ports
+        if self.pic.handle_io_out(port, val) {
+            return true;
+        }
+
+        // PIT ports -- silently ignore (guest shouldn't use them with pv-timer)
+        if port == 0x43 || port == 0x40 {
+            return true;
+        }
+
+        // Speaker port (0x61) -- silently ignore
         if port == 0x61 {
             return true;
         }
