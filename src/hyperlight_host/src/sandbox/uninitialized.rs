@@ -29,9 +29,13 @@ use crate::func::host_functions::{HostFunction, register_host_function};
 use crate::func::{ParameterTuple, SupportedReturnType};
 #[cfg(feature = "build-metadata")]
 use crate::log_build_details;
+#[cfg(feature = "nanvix-unstable")]
+use crate::mem::layout::SandboxMemoryLayout;
 use crate::mem::memory_region::{DEFAULT_GUEST_BLOB_MEM_FLAGS, MemoryRegionFlags};
 use crate::mem::mgr::SandboxMemoryManager;
 use crate::mem::shared_mem::ExclusiveSharedMemory;
+#[cfg(feature = "nanvix-unstable")]
+use crate::mem::shared_mem::SharedMemory;
 use crate::sandbox::SandboxConfiguration;
 use crate::{MultiUseSandbox, Result, new_error};
 
@@ -52,6 +56,56 @@ pub(crate) struct SandboxRuntimeConfig {
     /// in `set_up_hypervisor_partition`.
     #[cfg(crashdump)]
     pub(crate) entry_point: Option<u64>,
+}
+
+/// A counting semaphore backed by a u64 in guest shared memory.
+///
+/// Created via [`UninitializedSandbox::guest_semaphore()`]. The host
+/// manipulates the counter with [`increment()`](Self::increment) and
+/// [`decrement()`](Self::decrement); the guest reads the same location
+/// with a volatile load at the agreed-upon GPA.
+#[cfg(feature = "nanvix-unstable")]
+#[derive(Debug)]
+pub struct GuestSemaphore {
+    ptr: *mut u64,
+    value: u64,
+}
+
+// SAFETY: The pointer targets mmap'd shared memory owned by the sandbox.
+// Access must be externally synchronised (e.g. via Mutex<GuestSemaphore>).
+#[cfg(feature = "nanvix-unstable")]
+unsafe impl Send for GuestSemaphore {}
+
+#[cfg(feature = "nanvix-unstable")]
+impl GuestSemaphore {
+    /// Increments the counter by one and writes it to guest memory with
+    /// a volatile store.
+    pub fn increment(&mut self) -> Result<()> {
+        self.value = self
+            .value
+            .checked_add(1)
+            .ok_or_else(|| new_error!("GuestSemaphore overflow"))?;
+        // SAFETY: `ptr` was validated as aligned and in-bounds at construction time.
+        unsafe { core::ptr::write_volatile(self.ptr, self.value) };
+        Ok(())
+    }
+
+    /// Decrements the counter by one and writes it to guest memory with
+    /// a volatile store.
+    pub fn decrement(&mut self) -> Result<()> {
+        self.value = self
+            .value
+            .checked_sub(1)
+            .ok_or_else(|| new_error!("GuestSemaphore underflow"))?;
+        // SAFETY: `ptr` was validated as aligned and in-bounds at construction time.
+        unsafe { core::ptr::write_volatile(self.ptr, self.value) };
+        Ok(())
+    }
+
+    /// Returns the current host-side value of the counter.
+    pub fn value(&self) -> u64 {
+        self.value
+    }
 }
 
 /// A preliminary sandbox that represents allocated memory and registered host functions,
@@ -169,6 +223,57 @@ impl<'a> From<GuestBinary<'a>> for GuestEnvironment<'a, '_> {
 }
 
 impl UninitializedSandbox {
+    /// Creates a [`GuestSemaphore`] backed by a u64 counter at the given
+    /// guest physical address (GPA).
+    ///
+    /// The GPA must fall within the sandbox's allocated memory region and
+    /// be 8-byte aligned.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure the returned `GuestSemaphore` does not
+    /// outlive the sandbox's underlying shared memory mapping (which
+    /// stays alive through `evolve()` into `MultiUseSandbox`).
+    #[cfg(feature = "nanvix-unstable")]
+    pub unsafe fn guest_semaphore(&mut self, gpa: usize) -> Result<GuestSemaphore> {
+        let base = SandboxMemoryLayout::BASE_ADDRESS;
+        let mem_size = self.mgr.shared_mem.mem_size();
+
+        if gpa < base {
+            return Err(new_error!(
+                "GPA {:#x} is below the sandbox base address ({:#x})",
+                gpa,
+                base
+            ));
+        }
+
+        let offset = gpa - base;
+
+        if gpa % core::mem::align_of::<u64>() != 0 {
+            return Err(new_error!(
+                "GPA {:#x} is not 8-byte aligned",
+                gpa,
+            ));
+        }
+
+        let end = offset.checked_add(core::mem::size_of::<u64>()).ok_or_else(|| {
+            new_error!("GPA {:#x} causes offset overflow", gpa)
+        })?;
+        if end > mem_size {
+            return Err(new_error!(
+                "GPA {:#x} (offset {:#x}, end {:#x}) is outside the sandbox memory region (size {:#x})",
+                gpa,
+                offset,
+                end,
+                mem_size
+            ));
+        }
+
+        let ptr = unsafe { self.mgr.shared_mem.base_ptr().add(offset) as *mut u64 };
+        let value = unsafe { core::ptr::read_volatile(ptr) };
+        Ok(GuestSemaphore { ptr, value })
+    }
+
     // Creates a new uninitialized sandbox from a pre-built snapshot.
     // Note that since memory configuration is part of the snapshot the only configuration
     // that can be changed (from the original snapshot) is the configuration defines the behaviour of
@@ -1312,6 +1417,105 @@ mod tests {
             )
             .expect("Failed to create new_sandbox");
             let _evolved = new_sandbox.evolve().expect("Failed to evolve new_sandbox");
+        }
+    }
+
+    #[cfg(feature = "nanvix-unstable")]
+    mod guest_semaphore_tests {
+        use hyperlight_testing::simple_guest_as_string;
+
+        use crate::mem::shared_mem::SharedMemory;
+        use crate::sandbox::uninitialized::GuestBinary;
+        use crate::UninitializedSandbox;
+
+        fn make_sandbox() -> UninitializedSandbox {
+            UninitializedSandbox::new(
+                GuestBinary::FilePath(simple_guest_as_string().expect("Guest Binary Missing")),
+                None,
+            )
+            .expect("Failed to create sandbox")
+        }
+
+        #[test]
+        fn valid_gpa() {
+            use crate::mem::layout::SandboxMemoryLayout;
+
+            let mut sandbox = make_sandbox();
+            let mem_size = sandbox.mgr.shared_mem.mem_size();
+            // Pick an aligned GPA well within bounds
+            let gpa = SandboxMemoryLayout::BASE_ADDRESS + 0x1000;
+            assert!(gpa % 8 == 0);
+            assert!(gpa - SandboxMemoryLayout::BASE_ADDRESS + 8 <= mem_size);
+
+            let sem = unsafe { sandbox.guest_semaphore(gpa) };
+            assert!(sem.is_ok());
+        }
+
+        #[test]
+        fn out_of_range_gpa() {
+            let mut sandbox = make_sandbox();
+            // GPA far beyond any reasonable allocation
+            let sem = unsafe { sandbox.guest_semaphore(0xFFFF_FFFF_FFFF_FFF0) };
+            assert!(sem.is_err());
+        }
+
+        #[test]
+        fn below_base_or_misaligned_gpa() {
+            let mut sandbox = make_sandbox();
+            // GPA 1 is either below BASE_ADDRESS (default) or misaligned (nanvix-unstable)
+            let sem = unsafe { sandbox.guest_semaphore(1) };
+            assert!(sem.is_err());
+        }
+
+        #[test]
+        fn misaligned_gpa() {
+            use crate::mem::layout::SandboxMemoryLayout;
+
+            let mut sandbox = make_sandbox();
+            // Pick a GPA that's within range but not 8-byte aligned
+            let gpa = SandboxMemoryLayout::BASE_ADDRESS + 0x1001;
+            let sem = unsafe { sandbox.guest_semaphore(gpa) };
+            assert!(sem.is_err());
+            let err = sem.unwrap_err().to_string();
+            assert!(err.contains("not 8-byte aligned"), "got: {err}");
+        }
+
+        #[test]
+        fn increment_decrement() {
+            use crate::mem::layout::SandboxMemoryLayout;
+
+            let mut sandbox = make_sandbox();
+            let gpa = SandboxMemoryLayout::BASE_ADDRESS + 0x1000;
+            let mut sem = unsafe { sandbox.guest_semaphore(gpa) }.unwrap();
+
+            let initial = sem.value();
+            sem.increment().unwrap();
+            assert_eq!(sem.value(), initial + 1);
+            sem.increment().unwrap();
+            assert_eq!(sem.value(), initial + 2);
+            sem.decrement().unwrap();
+            assert_eq!(sem.value(), initial + 1);
+        }
+
+        #[test]
+        fn underflow_returns_error() {
+            use crate::mem::layout::SandboxMemoryLayout;
+
+            let mut sandbox = make_sandbox();
+            let gpa = SandboxMemoryLayout::BASE_ADDRESS + 0x1000;
+
+            // Zero the memory at the GPA first
+            let base = SandboxMemoryLayout::BASE_ADDRESS;
+            let offset = gpa - base;
+            unsafe {
+                let ptr = sandbox.mgr.shared_mem.base_ptr().add(offset) as *mut u64;
+                core::ptr::write_volatile(ptr, 0);
+            }
+
+            let mut sem = unsafe { sandbox.guest_semaphore(gpa) }.unwrap();
+            assert_eq!(sem.value(), 0);
+            let result = sem.decrement();
+            assert!(result.is_err());
         }
     }
 }
