@@ -183,6 +183,9 @@ pub struct UninitializedSandbox {
     /// multiple counters that would have divergent cached values.
     #[cfg(feature = "nanvix-unstable")]
     counter_taken: std::sync::atomic::AtomicBool,
+    /// File mappings prepared by [`Self::map_file_cow`] that will be
+    /// applied to the VM during [`Self::evolve`].
+    pub(crate) pending_file_mappings: Vec<super::file_mapping::PreparedFileMapping>,
 }
 
 impl Debug for UninitializedSandbox {
@@ -381,6 +384,7 @@ impl UninitializedSandbox {
             deferred_hshm: Arc::new(Mutex::new(None)),
             #[cfg(feature = "nanvix-unstable")]
             counter_taken: std::sync::atomic::AtomicBool::new(false),
+            pending_file_mappings: Vec::new(),
         };
 
         // If we were passed a writer for host print register it otherwise use the default.
@@ -430,6 +434,24 @@ impl UninitializedSandbox {
     #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
     pub fn evolve(self) -> Result<MultiUseSandbox> {
         evolve_impl_multi_use(self)
+    }
+
+    /// Map the contents of a file into the guest at a particular address.
+    ///
+    /// The file mapping is prepared immediately (host-side OS work) but
+    /// the actual VM-side mapping is deferred until [`evolve()`](Self::evolve).
+    ///
+    /// Returns the length of the mapping in bytes.
+    #[instrument(err(Debug), skip(self, file_path, guest_base), parent = Span::current())]
+    pub fn map_file_cow(
+        &mut self,
+        file_path: &std::path::Path,
+        guest_base: u64,
+    ) -> crate::Result<u64> {
+        let prepared = super::file_mapping::prepare_file_cow(file_path, guest_base)?;
+        let size = prepared.size as u64;
+        self.pending_file_mappings.push(prepared);
+        Ok(size)
     }
 
     /// Sets the maximum log level for guest code execution.

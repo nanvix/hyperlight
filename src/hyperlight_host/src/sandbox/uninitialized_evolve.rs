@@ -91,6 +91,19 @@ pub(super) fn evolve_impl_multi_use(u_sbox: UninitializedSandbox) -> Result<Mult
     )
     .map_err(HyperlightVmError::Initialize)?;
 
+    // Apply any file mappings that were prepared before evolve.
+    // This must happen after vm.initialise() since map_region
+    // requires page_size to be set.
+    for mut prepared in u_sbox.pending_file_mappings {
+        let region = prepared.to_memory_region()?;
+        unsafe { vm.map_region(&region) }.map_err(|e| {
+            crate::HyperlightError::HyperlightVmError(HyperlightVmError::MapRegion(e))
+        })?;
+        // Ownership transferred to VM layer — don't clean up on drop
+        prepared.consume();
+        hshm.mapped_rgns += 1;
+    }
+
     #[cfg(gdb)]
     let dbg_mem_wrapper = Arc::new(Mutex::new(hshm.clone()));
 
