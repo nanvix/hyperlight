@@ -25,9 +25,10 @@ use hyperlight_common::outb::OutBAction;
 use tracing::Span;
 #[cfg(feature = "trace_guest")]
 use tracing_opentelemetry::OpenTelemetrySpanExt;
-use windows::Win32::Foundation::{FreeLibrary, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, FreeLibrary, HANDLE};
 use windows::Win32::System::Hypervisor::*;
 use windows::Win32::System::LibraryLoader::*;
+use windows::Win32::System::Memory::{MEMORY_MAPPED_VIEW_ADDRESS, UnmapViewOfFile};
 use windows::core::s;
 use windows_result::HRESULT;
 
@@ -45,7 +46,8 @@ use crate::hypervisor::virtual_machine::{
     CreateVmError, HypervisorError, MapMemoryError, RegisterError, RunVcpuError, UnmapMemoryError,
     VirtualMachine, VmExit, XSAVE_MIN_SIZE,
 };
-use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
+use crate::hypervisor::wrappers::HandleWrapper;
+use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags, MemoryRegionType};
 #[cfg(feature = "trace_guest")]
 use crate::sandbox::trace::TraceContext as SandboxTraceContext;
 
@@ -70,6 +72,23 @@ pub(crate) fn is_hypervisor_present() -> bool {
     }
 }
 
+/// Helper: release a host-side file mapping view and its handle.
+/// Called from both `unmap_memory` and `WhpVm::drop`.
+fn release_file_mapping(view_base: *mut c_void, mapping_handle: HandleWrapper) {
+    unsafe {
+        if let Err(e) = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: view_base }) {
+            tracing::error!("Failed to unmap file view at {:?}: {:?}", view_base, e);
+        }
+        if let Err(e) = CloseHandle(mapping_handle.into()) {
+            tracing::error!(
+                "Failed to close file mapping handle {:?}: {:?}",
+                mapping_handle,
+                e
+            );
+        }
+    }
+}
+
 /// A Windows Hypervisor Platform implementation of a single-vcpu VM
 #[derive(Debug)]
 pub(crate) struct WhpVm {
@@ -82,6 +101,9 @@ pub(crate) struct WhpVm {
     /// Handle for the software timer thread.
     #[cfg(feature = "hw-interrupts")]
     timer_thread: Option<std::thread::JoinHandle<()>>,
+    /// Tracks host-side file mappings (view_base, mapping_handle) for
+    /// cleanup on unmap or drop. Only populated for MappedFile regions.
+    file_mappings: Vec<(HandleWrapper, *mut c_void)>,
 }
 
 // Safety: `WhpVm` is !Send because it holds `SurrogateProcess` which contains a raw pointer
@@ -89,6 +111,8 @@ pub(crate) struct WhpVm {
 // in the surrogate process. It is never dereferenced, only used for address arithmetic and
 // resource management (unmapping). This is a system resource that is not bound to the creating
 // thread and can be safely transferred between threads.
+// `file_mappings` contains raw pointers that are also kernel resource handles,
+// safe to use from any thread.
 unsafe impl Send for WhpVm {}
 
 impl WhpVm {
@@ -182,6 +206,7 @@ impl WhpVm {
             timer_stop: None,
             #[cfg(feature = "hw-interrupts")]
             timer_thread: None,
+            file_mappings: Vec::new(),
         };
 
         Ok(vm)
@@ -267,6 +292,7 @@ impl VirtualMachine for WhpVm {
                 region.host_region.start.from_handle,
                 region.host_region.start.handle_base,
                 region.host_region.start.handle_size,
+                &region.region_type.surrogate_mapping(),
             )
             .map_err(|e| MapMemoryError::SurrogateProcess(e.to_string()))?;
         let surrogate_addr = surrogate_base.wrapping_add(region.host_region.start.offset);
@@ -316,6 +342,14 @@ impl VirtualMachine for WhpVm {
             )));
         }
 
+        // Track host-side file mappings for cleanup on unmap or drop.
+        if region.region_type == MemoryRegionType::MappedFile {
+            self.file_mappings.push((
+                region.host_region.start.from_handle,
+                region.host_region.start.handle_base as *mut c_void,
+            ));
+        }
+
         Ok(())
     }
 
@@ -333,6 +367,20 @@ impl VirtualMachine for WhpVm {
         }
         self.surrogate_process
             .unmap(region.host_region.start.handle_base);
+
+        // Clean up host-side file mapping resources for MappedFile regions.
+        if region.region_type == MemoryRegionType::MappedFile {
+            let handle_base = region.host_region.start.handle_base as *mut c_void;
+            if let Some(pos) = self
+                .file_mappings
+                .iter()
+                .position(|(_, vb)| *vb == handle_base)
+            {
+                let (handle, view) = self.file_mappings.swap_remove(pos);
+                release_file_mapping(view, handle);
+            }
+        }
+
         Ok(())
     }
 
@@ -1081,6 +1129,11 @@ impl Drop for WhpVm {
         // Stop the software timer thread before tearing down the partition.
         #[cfg(feature = "hw-interrupts")]
         self.stop_timer_thread();
+
+        // Clean up any remaining file mappings that weren't explicitly unmapped.
+        for (handle, view) in self.file_mappings.drain(..) {
+            release_file_mapping(view, handle);
+        }
 
         // HyperlightVm::drop() calls set_dropped() before this runs.
         // set_dropped() ensures no WHvCancelRunVirtualProcessor calls are in progress

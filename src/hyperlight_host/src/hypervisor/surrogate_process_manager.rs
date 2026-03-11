@@ -459,6 +459,7 @@ mod tests {
                 HandleWrapper::from(mem.get_mmap_file_handle()),
                 mem.raw_ptr() as usize,
                 mem.raw_mem_size(),
+                &crate::mem::memory_region::SurrogateMapping::SandboxMemory,
             )
             .unwrap();
 
@@ -497,5 +498,128 @@ mod tests {
             );
             assert!(success.is_err());
         }
+    }
+
+    /// Tests that [`SurrogateMapping::ReadOnlyFile`] skips guard pages entirely.
+    ///
+    /// When mapping with `ReadOnlyFile`, the first and last pages should be
+    /// accessible (no `PAGE_NOACCESS` guard pages set), unlike `SandboxMemory`
+    /// which marks them as guard pages.
+    #[test]
+    fn readonly_file_mapping_skips_guard_pages() {
+        const SIZE: usize = 4096;
+        let mgr = get_surrogate_process_manager().unwrap();
+        let mem = ExclusiveSharedMemory::new(SIZE).unwrap();
+
+        let mut process = mgr.get_surrogate_process().unwrap();
+        let surrogate_address = process
+            .map(
+                HandleWrapper::from(mem.get_mmap_file_handle()),
+                mem.raw_ptr() as usize,
+                mem.raw_mem_size(),
+                &crate::mem::memory_region::SurrogateMapping::ReadOnlyFile,
+            )
+            .unwrap();
+
+        let buffer = vec![0u8; SIZE];
+        let bytes_read: Option<*mut usize> = None;
+        let process_handle: HANDLE = process.process_handle.into();
+
+        unsafe {
+            // read the first page — should succeed (no guard page for ReadOnlyFile)
+            let success = windows::Win32::System::Diagnostics::Debug::ReadProcessMemory(
+                process_handle,
+                surrogate_address,
+                buffer.as_ptr() as *mut c_void,
+                SIZE,
+                bytes_read,
+            );
+            assert!(
+                success.is_ok(),
+                "First page should be readable with ReadOnlyFile (no guard page)"
+            );
+
+            // read the middle page — should also succeed
+            let success = windows::Win32::System::Diagnostics::Debug::ReadProcessMemory(
+                process_handle,
+                surrogate_address.wrapping_add(SIZE),
+                buffer.as_ptr() as *mut c_void,
+                SIZE,
+                bytes_read,
+            );
+            assert!(
+                success.is_ok(),
+                "Middle page should be readable with ReadOnlyFile"
+            );
+
+            // read the last page — should succeed (no guard page for ReadOnlyFile)
+            let success = windows::Win32::System::Diagnostics::Debug::ReadProcessMemory(
+                process_handle,
+                surrogate_address.wrapping_add(2 * SIZE),
+                buffer.as_ptr() as *mut c_void,
+                SIZE,
+                bytes_read,
+            );
+            assert!(
+                success.is_ok(),
+                "Last page should be readable with ReadOnlyFile (no guard page)"
+            );
+        }
+    }
+
+    /// Tests that the reference counting in [`SurrogateProcess::map`] works
+    /// correctly — repeated maps to the same `host_base` increment the count
+    /// and return the same surrogate address, regardless of the mapping type
+    /// passed on subsequent calls.
+    #[test]
+    fn surrogate_map_ref_counting() {
+        let mgr = get_surrogate_process_manager().unwrap();
+        let mem = ExclusiveSharedMemory::new(4096).unwrap();
+
+        let mut process = mgr.get_surrogate_process().unwrap();
+        let handle = HandleWrapper::from(mem.get_mmap_file_handle());
+        let host_base = mem.raw_ptr() as usize;
+        let host_size = mem.raw_mem_size();
+
+        // First map — creates the mapping
+        let addr1 = process
+            .map(
+                handle,
+                host_base,
+                host_size,
+                &crate::mem::memory_region::SurrogateMapping::SandboxMemory,
+            )
+            .unwrap();
+
+        // Second map — should reuse (ref count incremented)
+        let addr2 = process
+            .map(
+                handle,
+                host_base,
+                host_size,
+                &crate::mem::memory_region::SurrogateMapping::SandboxMemory,
+            )
+            .unwrap();
+
+        assert_eq!(
+            addr1, addr2,
+            "Repeated map should return the same surrogate address"
+        );
+
+        // First unmap — decrements ref count but should NOT actually unmap
+        process.unmap(host_base);
+
+        // The mapping should still be present (ref count was 2, now 1)
+        assert!(
+            process.mappings.contains_key(&host_base),
+            "Mapping should still exist after first unmap (ref count > 0)"
+        );
+
+        // Second unmap — ref count hits 0, actually unmaps
+        process.unmap(host_base);
+        assert!(
+            !process.mappings.contains_key(&host_base),
+            "Mapping should be removed after ref count reaches 0"
+        );
     }
 }

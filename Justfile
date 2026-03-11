@@ -43,10 +43,10 @@ build target=default-target:
 guests: build-and-move-rust-guests build-and-move-c-guests
 
 ensure-cargo-hyperlight:
-    command -v cargo-hyperlight >/dev/null 2>&1 || cargo install --locked cargo-hyperlight
+    {{ if os() == "windows" { "if (-not (Get-Command cargo-hyperlight -ErrorAction SilentlyContinue)) { cargo install --locked cargo-hyperlight }" } else { "command -v cargo-hyperlight >/dev/null 2>&1 || cargo install --locked cargo-hyperlight" } }}
 
 witguest-wit:
-    command -v wasm-tools >/dev/null 2>&1 || cargo install --locked wasm-tools
+    {{ if os() == "windows" { "if (-not (Get-Command wasm-tools -ErrorAction SilentlyContinue)) { cargo install --locked wasm-tools }" } else { "command -v wasm-tools >/dev/null 2>&1 || cargo install --locked wasm-tools" } }}
     cd src/tests/rust_guests/witguest && wasm-tools component wit guest.wit -w -o interface.wasm
     cd src/tests/rust_guests/witguest && wasm-tools component wit two_worlds.wit -w -o twoworlds.wasm
 
@@ -294,19 +294,21 @@ check:
     {{ cargo-cmd }} check -p hyperlight-host --features nanvix-unstable,executable_heap  {{ target-triple-flag }}
     {{ cargo-cmd }} check -p hyperlight-host --features hw-interrupts  {{ target-triple-flag }}
 
-fmt-check:
-    rustup +nightly component list | grep -q "rustfmt.*installed" || rustup component add rustfmt --toolchain nightly
+fmt-check: (ensure-nightly-fmt)
     cargo +nightly fmt --all -- --check
     cargo +nightly fmt --manifest-path src/tests/rust_guests/simpleguest/Cargo.toml -- --check
     cargo +nightly fmt --manifest-path src/tests/rust_guests/dummyguest/Cargo.toml -- --check
     cargo +nightly fmt --manifest-path src/tests/rust_guests/witguest/Cargo.toml -- --check
     cargo +nightly fmt --manifest-path src/hyperlight_guest_capi/Cargo.toml -- --check
 
+[private]
+ensure-nightly-fmt:
+    {{ if os() == "windows" { "if (-not (rustup +nightly component list | Select-String 'rustfmt.*installed')) { rustup component add rustfmt --toolchain nightly }" } else { "rustup +nightly component list | grep -q 'rustfmt.*installed' || rustup component add rustfmt --toolchain nightly" } }}
+
 check-license-headers:
     ./dev/check-license-headers.sh
 
-fmt-apply:
-    rustup +nightly component list | grep -q "rustfmt.*installed" || rustup component add rustfmt --toolchain nightly
+fmt-apply: (ensure-nightly-fmt)
     cargo +nightly fmt --all
     cargo +nightly fmt --manifest-path src/tests/rust_guests/simpleguest/Cargo.toml
     cargo +nightly fmt --manifest-path src/tests/rust_guests/dummyguest/Cargo.toml

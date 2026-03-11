@@ -112,10 +112,13 @@ impl TryFrom<hv_x64_memory_intercept_message> for MemoryRegionFlags {
     }
 }
 
-// only used for debugging
+// NOTE: In the future, all host-side knowledge about memory region types
+// should collapse down to Snapshot vs Scratch (see shared_mem.rs).
+// Until then, these variants help distinguish regions for diagnostics
+// and crash dumps. Not part of the public API.
 #[derive(Debug, PartialEq, Eq, Copy, Clone, Hash)]
 /// The type of memory region
-pub enum MemoryRegionType {
+pub(crate) enum MemoryRegionType {
     /// The region contains the guest's code
     Code,
     /// The region contains the guest's init data
@@ -128,6 +131,26 @@ pub enum MemoryRegionType {
     Scratch,
     /// The snapshot region
     Snapshot,
+    /// An externally-mapped file (via [`MultiUseSandbox::map_file_cow`]).
+    /// These regions are backed by file handles (Windows) or mmap
+    /// (Linux) and are read-only + executable. They are cleaned up
+    /// during restore/drop — not part of the guest's own allocator.
+    MappedFile,
+}
+
+#[cfg(target_os = "windows")]
+impl MemoryRegionType {
+    /// Derives the [`SurrogateMapping`] from this region type.
+    ///
+    /// `MappedFile` regions use read-only file-backed mappings with no
+    /// guard pages; all other region types use the standard sandbox
+    /// shared memory mapping with guard pages.
+    pub(crate) fn surrogate_mapping(&self) -> SurrogateMapping {
+        match self {
+            MemoryRegionType::MappedFile => SurrogateMapping::ReadOnlyFile,
+            _ => SurrogateMapping::SandboxMemory,
+        }
+    }
 }
 
 /// A trait that distinguishes between different kinds of memory region representations.
@@ -162,6 +185,22 @@ impl MemoryRegionKind for HostGuestMemoryRegion {
         base + size
     }
 }
+/// Describes how a memory region should be mapped through the surrogate process
+/// pipeline on Windows (WHP).
+///
+/// Different mapping types require different page protections and guard page
+/// behaviour when projected into the surrogate process via `MapViewOfFileNuma2`.
+#[cfg(target_os = "windows")]
+#[derive(Debug, PartialEq, Eq, Copy, Clone, Hash)]
+pub(crate) enum SurrogateMapping {
+    /// Standard sandbox shared memory: mapped with `PAGE_READWRITE` protection
+    /// and guard pages (`PAGE_NOACCESS`) set on the first and last pages.
+    SandboxMemory,
+    /// File-backed read-only mapping: mapped with `PAGE_READONLY` protection
+    /// and **no** guard pages.
+    ReadOnlyFile,
+}
+
 /// A [`HostRegionBase`] keeps track of not just a pointer, but also a
 /// file mapping into which it is pointing.  This is used on WHP,
 /// where mapping the actual pointer into the VM actually involves
@@ -243,7 +282,7 @@ pub struct MemoryRegion_<K: MemoryRegionKind> {
     /// memory access flags for the given region
     pub flags: MemoryRegionFlags,
     /// the type of memory region
-    pub region_type: MemoryRegionType,
+    pub(crate) region_type: MemoryRegionType,
 }
 
 /// A memory region that tracks both host and guest addresses.
