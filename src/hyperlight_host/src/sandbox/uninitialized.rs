@@ -29,8 +29,6 @@ use crate::func::host_functions::{HostFunction, register_host_function};
 use crate::func::{ParameterTuple, SupportedReturnType};
 #[cfg(feature = "build-metadata")]
 use crate::log_build_details;
-#[cfg(feature = "nanvix-unstable")]
-use crate::mem::layout::SandboxMemoryLayout;
 use crate::mem::memory_region::{DEFAULT_GUEST_BLOB_MEM_FLAGS, MemoryRegionFlags};
 use crate::mem::mgr::SandboxMemoryManager;
 use crate::mem::shared_mem::ExclusiveSharedMemory;
@@ -58,17 +56,33 @@ pub(crate) struct SandboxRuntimeConfig {
     pub(crate) entry_point: Option<u64>,
 }
 
-/// A host-authoritative shared counter backed by a u64 in guest scratch memory.
+/// A host-authoritative shared counter exposed to the guest via a `u64`
+/// in guest scratch memory.
 ///
 /// Created via [`UninitializedSandbox::guest_counter()`]. The host owns
 /// the counter value and is the only writer: [`increment()`](Self::increment)
 /// and [`decrement()`](Self::decrement) update the cached value and issue a
 /// single `write_volatile` to shared memory. [`value()`](Self::value) returns
-/// the cached value — the host never reads back from guest memory, preventing
-/// a confused-deputy attack where a malicious guest could manipulate the counter.
+/// the cached value — the host never reads back from guest memory, so a
+/// malicious guest cannot influence the host's view of the counter.
 ///
 /// Thread safety is provided by an internal `Mutex`, so `increment()` and
 /// `decrement()` take `&self` rather than `&mut self`.
+///
+/// # Implementation note
+///
+/// `GuestCounter` uses raw `write_volatile` instead of going through
+/// [`SharedMemory`] methods because it is created on an
+/// [`UninitializedSandbox`] (which holds `ExclusiveSharedMemory`), but
+/// must survive across [`evolve()`](UninitializedSandbox::evolve) into
+/// `MultiUseSandbox` (which holds `HostSharedMemory`). The pointer
+/// remains valid because `evolve()` internally clones the backing
+/// `Arc<HostMapping>` into both `HostSharedMemory` and
+/// `GuestSharedMemory`, keeping the mmap alive.
+///
+/// Only **one** `GuestCounter` should be created per sandbox. Creating
+/// multiple instances is safe from a memory perspective, but the
+/// internal cached values will diverge, leading to incorrect writes.
 #[cfg(feature = "nanvix-unstable")]
 pub struct GuestCounter {
     inner: Mutex<GuestCounterInner>,
@@ -242,25 +256,27 @@ impl<'a> From<GuestBinary<'a>> for GuestEnvironment<'a, '_> {
 }
 
 impl UninitializedSandbox {
-    /// Creates a [`GuestCounter`] backed by a u64 at a fixed offset in
-    /// scratch memory.
+    /// Creates a [`GuestCounter`] at a fixed offset in scratch memory.
     ///
-    /// The counter lives at `SCRATCH_TOP_GUEST_COUNTER_OFFSET` from
-    /// the top of scratch, so both host and guest can locate it without
-    /// an explicit GPA parameter.
+    /// The counter lives at `SCRATCH_TOP_GUEST_COUNTER_OFFSET` bytes from
+    /// the top of scratch memory, so both host and guest can locate it
+    /// without an explicit GPA parameter.
     ///
     /// # Safety
     ///
-    /// The caller must ensure the returned `GuestCounter` does not
-    /// outlive the sandbox's underlying shared memory mapping (which
-    /// stays alive through `evolve()` into `MultiUseSandbox`).
+    /// The caller must ensure:
+    /// - The returned `GuestCounter` does not outlive the sandbox's
+    ///   underlying shared memory mapping (which stays alive through
+    ///   `evolve()` into `MultiUseSandbox`).
+    /// - Only **one** `GuestCounter` is created per sandbox. Multiple
+    ///   instances are memory-safe but their cached values will diverge,
+    ///   leading to incorrect writes.
     #[cfg(feature = "nanvix-unstable")]
     pub unsafe fn guest_counter(&mut self) -> Result<GuestCounter> {
         use hyperlight_common::layout::SCRATCH_TOP_GUEST_COUNTER_OFFSET;
 
         let scratch_size = self.mgr.scratch_mem.mem_size();
-        if (SCRATCH_TOP_GUEST_COUNTER_OFFSET as usize) + core::mem::size_of::<u64>() > scratch_size
-        {
+        if (SCRATCH_TOP_GUEST_COUNTER_OFFSET as usize) > scratch_size {
             return Err(new_error!(
                 "scratch memory too small for guest counter (size {:#x}, need offset {:#x})",
                 scratch_size,
