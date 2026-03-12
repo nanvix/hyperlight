@@ -322,6 +322,51 @@ impl UninitializedSandbox {
         })
     }
 
+    /// Writes the RAMFS base GVA and size into scratch memory so the
+    /// guest kernel can discover the region during boot.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure `base_gva` and `size` describe a valid
+    /// region within the sandbox's guest address space.
+    #[cfg(feature = "nanvix-unstable")]
+    pub unsafe fn write_ramfs_info(&mut self, base_gva: u64, size: u64) -> Result<()> {
+        use hyperlight_common::layout::{
+            SCRATCH_TOP_RAMFS_BASE_OFFSET, SCRATCH_TOP_RAMFS_SIZE_OFFSET,
+        };
+
+        let scratch_size = self.mgr.scratch_mem.mem_size();
+        let max_offset =
+            core::cmp::max(SCRATCH_TOP_RAMFS_BASE_OFFSET, SCRATCH_TOP_RAMFS_SIZE_OFFSET);
+        if (max_offset as usize) + core::mem::size_of::<u64>() > scratch_size {
+            return Err(new_error!(
+                "scratch memory too small for RAMFS info (size {:#x}, need offset {:#x})",
+                scratch_size,
+                max_offset,
+            ));
+        }
+
+        unsafe {
+            let base_ptr = self
+                .mgr
+                .scratch_mem
+                .base_ptr()
+                .add(scratch_size - SCRATCH_TOP_RAMFS_BASE_OFFSET as usize)
+                as *mut u64;
+            core::ptr::write_volatile(base_ptr, base_gva);
+
+            let size_ptr = self
+                .mgr
+                .scratch_mem
+                .base_ptr()
+                .add(scratch_size - SCRATCH_TOP_RAMFS_SIZE_OFFSET as usize)
+                as *mut u64;
+            core::ptr::write_volatile(size_ptr, size);
+        }
+
+        Ok(())
+    }
+
     // Creates a new uninitialized sandbox from a pre-built snapshot.
     // Note that since memory configuration is part of the snapshot the only configuration
     // that can be changed (from the original snapshot) is the configuration defines the behaviour of

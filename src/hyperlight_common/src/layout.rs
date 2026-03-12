@@ -44,6 +44,14 @@ pub const SCRATCH_TOP_EXN_STACK_OFFSET: u64 = 0x20;
 #[cfg(feature = "nanvix-unstable")]
 pub const SCRATCH_TOP_GUEST_COUNTER_OFFSET: u64 = 0x1008;
 
+/// Offset from the top of scratch memory for the RAMFS base GVA (u64).
+#[cfg(feature = "nanvix-unstable")]
+pub const SCRATCH_TOP_RAMFS_BASE_OFFSET: u64 = 0x1010;
+
+/// Offset from the top of scratch memory for the RAMFS size in bytes (u64).
+#[cfg(feature = "nanvix-unstable")]
+pub const SCRATCH_TOP_RAMFS_SIZE_OFFSET: u64 = 0x1018;
+
 pub fn scratch_base_gpa(size: usize) -> u64 {
     (MAX_GPA - size + 1) as u64
 }

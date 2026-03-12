@@ -39,3 +39,17 @@ pub fn guest_counter_gva() -> *const u64 {
     use hyperlight_common::layout::{MAX_GVA, SCRATCH_TOP_GUEST_COUNTER_OFFSET};
     (MAX_GVA as u64 - SCRATCH_TOP_GUEST_COUNTER_OFFSET + 1) as *const u64
 }
+
+/// Returns a pointer to the RAMFS base GVA u64 in scratch memory.
+#[cfg(feature = "nanvix-unstable")]
+pub fn ramfs_base_gva() -> *const u64 {
+    use hyperlight_common::layout::{MAX_GVA, SCRATCH_TOP_RAMFS_BASE_OFFSET};
+    (MAX_GVA as u64 - SCRATCH_TOP_RAMFS_BASE_OFFSET + 1) as *const u64
+}
+
+/// Returns a pointer to the RAMFS size u64 in scratch memory.
+#[cfg(feature = "nanvix-unstable")]
+pub fn ramfs_size_gva() -> *const u64 {
+    use hyperlight_common::layout::{MAX_GVA, SCRATCH_TOP_RAMFS_SIZE_OFFSET};
+    (MAX_GVA as u64 - SCRATCH_TOP_RAMFS_SIZE_OFFSET + 1) as *const u64
+}
