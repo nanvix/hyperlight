@@ -76,8 +76,8 @@ pub(crate) struct SandboxRuntimeConfig {
 /// avoids adding lock overhead to `ExclusiveSharedMemory` during the
 /// exclusive setup phase.
 ///
-/// The constructor takes `&mut self` on `UninitializedSandbox`, which
-/// prevents creating multiple instances simultaneously.
+/// Only one `GuestCounter` may be created per sandbox; a second call to
+/// [`UninitializedSandbox::guest_counter()`] returns an error.
 #[cfg(feature = "nanvix-unstable")]
 pub struct GuestCounter {
     inner: Mutex<GuestCounterInner>,
@@ -272,12 +272,24 @@ impl UninitializedSandbox {
     /// [`HostSharedMemory`] once [`build()`](ExclusiveSharedMemory::build)
     /// is called during [`evolve()`](Self::evolve).
     ///
-    /// Takes `&mut self` to prevent creating multiple instances
-    /// simultaneously (multiple instances would have divergent cached
-    /// values).
+    /// This method can only be called once; a second call returns an error
+    /// because multiple counters would have divergent cached values.
     #[cfg(feature = "nanvix-unstable")]
     pub fn guest_counter(&mut self) -> Result<GuestCounter> {
+        use std::sync::atomic::Ordering;
+
         use hyperlight_common::layout::SCRATCH_TOP_GUEST_COUNTER_OFFSET;
+
+        if self
+            .mgr
+            .scratch_mem
+            .counter_taken
+            .swap(true, Ordering::Relaxed)
+        {
+            return Err(new_error!(
+                "GuestCounter has already been created for this sandbox"
+            ));
+        }
 
         let scratch_size = self.mgr.scratch_mem.mem_size();
         if (SCRATCH_TOP_GUEST_COUNTER_OFFSET as usize) > scratch_size {
@@ -290,13 +302,12 @@ impl UninitializedSandbox {
 
         let offset = scratch_size - SCRATCH_TOP_GUEST_COUNTER_OFFSET as usize;
         let deferred_hshm = self.mgr.scratch_mem.deferred_hshm.clone();
-        let value = self.mgr.scratch_mem.read_u64(offset)?;
 
         Ok(GuestCounter {
             inner: Mutex::new(GuestCounterInner {
                 deferred_hshm,
                 offset,
-                value,
+                value: 0,
             }),
         })
     }
@@ -1449,12 +1460,9 @@ mod tests {
 
     #[cfg(feature = "nanvix-unstable")]
     mod guest_counter_tests {
-        use std::sync::{Arc, RwLock};
-
         use hyperlight_testing::simple_guest_as_string;
 
         use crate::UninitializedSandbox;
-        use crate::mem::shared_mem::HostSharedMemory;
         use crate::sandbox::uninitialized::GuestBinary;
 
         fn make_sandbox() -> UninitializedSandbox {
@@ -1465,22 +1473,19 @@ mod tests {
             .expect("Failed to create sandbox")
         }
 
-        /// Simulate `build()` for the scratch region by storing a
-        /// `HostSharedMemory` into the deferred slot.
-        fn simulate_build(sandbox: &UninitializedSandbox) {
-            let lock = Arc::new(RwLock::new(()));
-            let hshm = HostSharedMemory {
-                region: sandbox.mgr.scratch_mem.region.clone(),
-                lock,
-            };
-            *sandbox.mgr.scratch_mem.deferred_hshm.lock().unwrap() = Some(hshm);
-        }
-
         #[test]
         fn create_guest_counter() {
             let mut sandbox = make_sandbox();
             let counter = sandbox.guest_counter();
             assert!(counter.is_ok());
+        }
+
+        #[test]
+        fn only_one_counter_allowed() {
+            let mut sandbox = make_sandbox();
+            let _c1 = sandbox.guest_counter().unwrap();
+            let c2 = sandbox.guest_counter();
+            assert!(c2.is_err());
         }
 
         #[test]
@@ -1495,22 +1500,21 @@ mod tests {
         fn increment_decrement() {
             let mut sandbox = make_sandbox();
             let counter = sandbox.guest_counter().unwrap();
-            simulate_build(&sandbox);
+            sandbox.mgr.scratch_mem.simulate_build();
 
-            let initial = counter.value().unwrap();
             counter.increment().unwrap();
-            assert_eq!(counter.value().unwrap(), initial + 1);
+            assert_eq!(counter.value().unwrap(), 1);
             counter.increment().unwrap();
-            assert_eq!(counter.value().unwrap(), initial + 2);
+            assert_eq!(counter.value().unwrap(), 2);
             counter.decrement().unwrap();
-            assert_eq!(counter.value().unwrap(), initial + 1);
+            assert_eq!(counter.value().unwrap(), 1);
         }
 
         #[test]
         fn underflow_returns_error() {
             let mut sandbox = make_sandbox();
             let counter = sandbox.guest_counter().unwrap();
-            simulate_build(&sandbox);
+            sandbox.mgr.scratch_mem.simulate_build();
 
             assert_eq!(counter.value().unwrap(), 0);
             let result = counter.decrement();

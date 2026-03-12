@@ -20,6 +20,8 @@ use std::io::Error;
 use std::mem::{align_of, size_of};
 #[cfg(target_os = "linux")]
 use std::ptr::null_mut;
+#[cfg(feature = "nanvix-unstable")]
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 
 use hyperlight_common::mem::PAGE_SIZE_USIZE;
@@ -142,6 +144,11 @@ pub struct ExclusiveSharedMemory {
     /// before `build()` (e.g. `GuestCounter`) can clone this `Arc` and
     /// will see `Some` once `build()` completes.
     pub(crate) deferred_hshm: Arc<Mutex<Option<HostSharedMemory>>>,
+    /// Set to `true` once a [`GuestCounter`] has been handed out via
+    /// [`UninitializedSandbox::guest_counter()`]. Prevents creating
+    /// multiple counters that would have divergent cached values.
+    #[cfg(feature = "nanvix-unstable")]
+    pub(crate) counter_taken: AtomicBool,
 }
 unsafe impl Send for ExclusiveSharedMemory {}
 
@@ -326,8 +333,8 @@ unsafe impl Send for GuestSharedMemory {}
 /// becoming completely divorced from the view of the VM.
 #[derive(Clone, Debug)]
 pub struct HostSharedMemory {
-    pub(crate) region: Arc<HostMapping>,
-    pub(crate) lock: Arc<RwLock<()>>,
+    region: Arc<HostMapping>,
+    lock: Arc<RwLock<()>>,
 }
 unsafe impl Send for HostSharedMemory {}
 
@@ -430,6 +437,8 @@ impl ExclusiveSharedMemory {
                 size: total_size,
             }),
             deferred_hshm: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "nanvix-unstable")]
+            counter_taken: AtomicBool::new(false),
         })
     }
 
@@ -549,6 +558,8 @@ impl ExclusiveSharedMemory {
                 handle,
             }),
             deferred_hshm: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "nanvix-unstable")]
+            counter_taken: AtomicBool::new(false),
         })
     }
 
@@ -661,7 +672,13 @@ impl ExclusiveSharedMemory {
         };
         // Publish the HostSharedMemory so any pre-existing GuestCounter
         // can begin issuing volatile writes via the proper protocol.
-        *self.deferred_hshm.lock().unwrap() = Some(hshm.clone());
+        // The mutex is only locked here and during GuestCounter
+        // operations; since build() consumes self, there is no
+        // concurrent access that could poison it.
+        #[allow(clippy::unwrap_used)]
+        {
+            *self.deferred_hshm.lock().unwrap() = Some(hshm.clone());
+        }
         (
             hshm,
             GuestSharedMemory {
@@ -669,6 +686,19 @@ impl ExclusiveSharedMemory {
                 lock,
             },
         )
+    }
+
+    /// Populate the deferred `HostSharedMemory` slot without consuming
+    /// `self`. Used in tests where `evolve()` / full `build()` is not
+    /// available.
+    #[cfg(all(test, feature = "nanvix-unstable"))]
+    pub(crate) fn simulate_build(&self) {
+        let lock = Arc::new(RwLock::new(()));
+        let hshm = HostSharedMemory {
+            region: self.region.clone(),
+            lock,
+        };
+        *self.deferred_hshm.lock().unwrap() = Some(hshm);
     }
 
     /// Gets the file handle of the shared memory region for this Sandbox
@@ -859,6 +889,8 @@ impl SharedMemory for GuestSharedMemory {
         let mut excl = ExclusiveSharedMemory {
             region: self.region.clone(),
             deferred_hshm: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "nanvix-unstable")]
+            counter_taken: AtomicBool::new(false),
         };
         let ret = f(&mut excl);
         drop(excl);
@@ -1225,6 +1257,8 @@ impl SharedMemory for HostSharedMemory {
         let mut excl = ExclusiveSharedMemory {
             region: self.region.clone(),
             deferred_hshm: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "nanvix-unstable")]
+            counter_taken: AtomicBool::new(false),
         };
         let ret = f(&mut excl);
         drop(excl);
