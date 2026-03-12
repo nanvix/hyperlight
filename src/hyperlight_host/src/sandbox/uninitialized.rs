@@ -367,6 +367,41 @@ impl UninitializedSandbox {
         Ok(())
     }
 
+    /// Writes raw bytes into the sandbox's shared memory at a given guest
+    /// physical address (GPA) offset.
+    ///
+    /// This allows the host to place data (e.g. a RAMFS image) at a
+    /// specific GPA before the guest boots.  The data is written directly
+    /// into the snapshot memory — no additional KVM memory slot is needed,
+    /// which avoids overlap with the existing snapshot slot.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the GPA range `[gpa, gpa + data.len())`
+    /// falls within allocated shared memory and does not overwrite critical
+    /// sandbox data structures (PEB, I/O buffers, page tables, etc.).
+    #[cfg(feature = "nanvix-unstable")]
+    pub unsafe fn write_guest_memory(&mut self, gpa: u64, data: &[u8]) -> Result<()> {
+        let offset = gpa as usize;
+        let mem_size = self.mgr.shared_mem.mem_size();
+
+        if offset.checked_add(data.len()).is_none_or(|end| end > mem_size) {
+            return Err(new_error!(
+                "write_guest_memory: GPA range [{:#x}, {:#x}) exceeds shared memory size {:#x}",
+                gpa,
+                gpa + data.len() as u64,
+                mem_size,
+            ));
+        }
+
+        unsafe {
+            let dst = self.mgr.shared_mem.base_ptr().add(offset);
+            core::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len());
+        }
+
+        Ok(())
+    }
+
     // Creates a new uninitialized sandbox from a pre-built snapshot.
     // Note that since memory configuration is part of the snapshot the only configuration
     // that can be changed (from the original snapshot) is the configuration defines the behaviour of
