@@ -20,7 +20,7 @@ use std::io::Error;
 use std::mem::{align_of, size_of};
 #[cfg(target_os = "linux")]
 use std::ptr::null_mut;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use hyperlight_common::mem::PAGE_SIZE_USIZE;
 use tracing::{Span, instrument};
@@ -136,7 +136,12 @@ impl Drop for HostMapping {
 /// and taking snapshots.
 #[derive(Debug)]
 pub struct ExclusiveSharedMemory {
-    region: Arc<HostMapping>,
+    pub(crate) region: Arc<HostMapping>,
+    /// Populated by [`build()`](Self::build) with a [`HostSharedMemory`]
+    /// view of this region. Code that needs host-style volatile access
+    /// before `build()` (e.g. `GuestCounter`) can clone this `Arc` and
+    /// will see `Some` once `build()` completes.
+    pub(crate) deferred_hshm: Arc<Mutex<Option<HostSharedMemory>>>,
 }
 unsafe impl Send for ExclusiveSharedMemory {}
 
@@ -321,8 +326,8 @@ unsafe impl Send for GuestSharedMemory {}
 /// becoming completely divorced from the view of the VM.
 #[derive(Clone, Debug)]
 pub struct HostSharedMemory {
-    region: Arc<HostMapping>,
-    lock: Arc<RwLock<()>>,
+    pub(crate) region: Arc<HostMapping>,
+    pub(crate) lock: Arc<RwLock<()>>,
 }
 unsafe impl Send for HostSharedMemory {}
 
@@ -424,6 +429,7 @@ impl ExclusiveSharedMemory {
                 ptr: addr as *mut u8,
                 size: total_size,
             }),
+            deferred_hshm: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -542,6 +548,7 @@ impl ExclusiveSharedMemory {
                 size: total_size,
                 handle,
             }),
+            deferred_hshm: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -648,14 +655,18 @@ impl ExclusiveSharedMemory {
     /// the GuestSharedMemory.
     pub fn build(self) -> (HostSharedMemory, GuestSharedMemory) {
         let lock = Arc::new(RwLock::new(()));
+        let hshm = HostSharedMemory {
+            region: self.region.clone(),
+            lock: lock.clone(),
+        };
+        // Publish the HostSharedMemory so any pre-existing GuestCounter
+        // can begin issuing volatile writes via the proper protocol.
+        *self.deferred_hshm.lock().unwrap() = Some(hshm.clone());
         (
-            HostSharedMemory {
-                region: self.region.clone(),
-                lock: lock.clone(),
-            },
+            hshm,
             GuestSharedMemory {
                 region: self.region.clone(),
-                lock: lock.clone(),
+                lock,
             },
         )
     }
@@ -847,6 +858,7 @@ impl SharedMemory for GuestSharedMemory {
             .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?;
         let mut excl = ExclusiveSharedMemory {
             region: self.region.clone(),
+            deferred_hshm: Arc::new(Mutex::new(None)),
         };
         let ret = f(&mut excl);
         drop(excl);
@@ -1212,6 +1224,7 @@ impl SharedMemory for HostSharedMemory {
             .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?;
         let mut excl = ExclusiveSharedMemory {
             region: self.region.clone(),
+            deferred_hshm: Arc::new(Mutex::new(None)),
         };
         let ret = f(&mut excl);
         drop(excl);
