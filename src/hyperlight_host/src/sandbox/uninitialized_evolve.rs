@@ -73,6 +73,22 @@ pub(super) fn evolve_impl_multi_use(u_sbox: UninitializedSandbox) -> Result<Mult
 
     let page_size = u32::try_from(page_size::get())?;
 
+    // Set page_size on the VM so that map_region alignment checks work.
+    vm.set_page_size(page_size);
+
+    // Apply any file mappings that were prepared before evolve.
+    // This must happen before vm.initialise() so the guest kernel can
+    // access file-backed regions (e.g. RAMFS) during its init sequence.
+    for mut prepared in u_sbox.pending_file_mappings {
+        let region = prepared.to_memory_region()?;
+        unsafe { vm.map_region(&region) }.map_err(|e| {
+            crate::HyperlightError::HyperlightVmError(HyperlightVmError::MapRegion(e))
+        })?;
+        // Ownership transferred to VM layer — don't clean up on drop
+        prepared.consume();
+        hshm.mapped_rgns += 1;
+    }
+
     #[cfg(gdb)]
     let dbg_mem_access_hdl = Arc::new(Mutex::new(hshm.clone()));
 
@@ -90,19 +106,6 @@ pub(super) fn evolve_impl_multi_use(u_sbox: UninitializedSandbox) -> Result<Mult
         dbg_mem_access_hdl,
     )
     .map_err(HyperlightVmError::Initialize)?;
-
-    // Apply any file mappings that were prepared before evolve.
-    // This must happen after vm.initialise() since map_region
-    // requires page_size to be set.
-    for mut prepared in u_sbox.pending_file_mappings {
-        let region = prepared.to_memory_region()?;
-        unsafe { vm.map_region(&region) }.map_err(|e| {
-            crate::HyperlightError::HyperlightVmError(HyperlightVmError::MapRegion(e))
-        })?;
-        // Ownership transferred to VM layer — don't clean up on drop
-        prepared.consume();
-        hshm.mapped_rgns += 1;
-    }
 
     #[cfg(gdb)]
     let dbg_mem_wrapper = Arc::new(Mutex::new(hshm.clone()));

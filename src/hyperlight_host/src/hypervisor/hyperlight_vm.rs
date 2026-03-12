@@ -533,6 +533,16 @@ impl HyperlightVm {
         Ok(ret)
     }
 
+    /// Sets the page size used for alignment checks in [`map_region`].
+    ///
+    /// This must be called before any [`map_region`] call.  It is normally
+    /// called by [`initialise`], but callers that need to map regions
+    /// **before** the guest starts (e.g. file-backed RAMFS mappings) should
+    /// call this first.
+    pub(crate) fn set_page_size(&mut self, page_size: u32) {
+        self.page_size = page_size as usize;
+    }
+
     /// Initialise the internally stored vCPU with the given PEB address and
     /// random number seed, then run it until a HLT instruction.
     #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
