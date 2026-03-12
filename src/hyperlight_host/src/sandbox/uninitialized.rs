@@ -33,6 +33,8 @@ use crate::mem::memory_region::{DEFAULT_GUEST_BLOB_MEM_FLAGS, MemoryRegionFlags}
 use crate::mem::mgr::SandboxMemoryManager;
 use crate::mem::shared_mem::ExclusiveSharedMemory;
 #[cfg(feature = "nanvix-unstable")]
+use crate::mem::shared_mem::HostSharedMemory;
+#[cfg(feature = "nanvix-unstable")]
 use crate::mem::shared_mem::SharedMemory;
 use crate::sandbox::SandboxConfiguration;
 use crate::{MultiUseSandbox, Result, new_error};
@@ -70,11 +72,9 @@ pub(crate) struct SandboxRuntimeConfig {
 /// `decrement()` take `&self` rather than `&mut self`.
 ///
 /// The counter holds an `Arc<Mutex<Option<HostSharedMemory>>>` that is
-/// shared with [`ExclusiveSharedMemory`]. The `Option` is `None` until
-/// [`build()`](ExclusiveSharedMemory::build) populates it, at which point
-/// the counter can issue volatile writes via the proper protocol. This
-/// avoids adding lock overhead to `ExclusiveSharedMemory` during the
-/// exclusive setup phase.
+/// shared with [`UninitializedSandbox`]. The `Option` is `None` until
+/// [`evolve()`](UninitializedSandbox::evolve) populates it, at which point
+/// the counter can issue volatile writes via the proper protocol.
 ///
 /// Only one `GuestCounter` may be created per sandbox; a second call to
 /// [`UninitializedSandbox::guest_counter()`] returns an error.
@@ -85,7 +85,7 @@ pub struct GuestCounter {
 
 #[cfg(feature = "nanvix-unstable")]
 struct GuestCounterInner {
-    deferred_hshm: Arc<Mutex<Option<crate::mem::shared_mem::HostSharedMemory>>>,
+    deferred_hshm: Arc<Mutex<Option<HostSharedMemory>>>,
     offset: usize,
     value: u64,
 }
@@ -111,11 +111,12 @@ impl GuestCounter {
                 })?
                 .clone()
         };
-        inner.value = inner
+        let new_value = inner
             .value
             .checked_add(1)
             .ok_or_else(|| new_error!("GuestCounter overflow"))?;
-        shm.write::<u64>(inner.offset, inner.value)?;
+        shm.write::<u64>(inner.offset, new_value)?;
+        inner.value = new_value;
         Ok(())
     }
 
@@ -131,11 +132,12 @@ impl GuestCounter {
                 })?
                 .clone()
         };
-        inner.value = inner
+        let new_value = inner
             .value
             .checked_sub(1)
             .ok_or_else(|| new_error!("GuestCounter underflow"))?;
-        shm.write::<u64>(inner.offset, inner.value)?;
+        shm.write::<u64>(inner.offset, new_value)?;
+        inner.value = new_value;
         Ok(())
     }
 
@@ -170,6 +172,17 @@ pub struct UninitializedSandbox {
     // This is needed to convey the stack pointer between the snapshot
     // and the HyperlightVm creation
     pub(crate) stack_top_gva: u64,
+    /// Populated by [`evolve()`](Self::evolve) with a [`HostSharedMemory`]
+    /// view of scratch memory. Code that needs host-style volatile access
+    /// before `evolve()` (e.g. `GuestCounter`) can clone this `Arc` and
+    /// will see `Some` once `evolve()` completes.
+    #[cfg(feature = "nanvix-unstable")]
+    pub(crate) deferred_hshm: Arc<Mutex<Option<HostSharedMemory>>>,
+    /// Set to `true` once a [`GuestCounter`] has been handed out via
+    /// [`guest_counter()`](Self::guest_counter). Prevents creating
+    /// multiple counters that would have divergent cached values.
+    #[cfg(feature = "nanvix-unstable")]
+    counter_taken: std::sync::atomic::AtomicBool,
 }
 
 impl Debug for UninitializedSandbox {
@@ -267,10 +280,9 @@ impl UninitializedSandbox {
     /// the top of scratch memory, so both host and guest can locate it
     /// without an explicit GPA parameter.
     ///
-    /// The returned counter holds an `Arc` clone of the scratch memory's
+    /// The returned counter holds an `Arc` clone of the sandbox's
     /// `deferred_hshm`, so it will automatically gain access to the
-    /// [`HostSharedMemory`] once [`build()`](ExclusiveSharedMemory::build)
-    /// is called during [`evolve()`](Self::evolve).
+    /// [`HostSharedMemory`] once [`evolve()`](Self::evolve) completes.
     ///
     /// This method can only be called once; a second call returns an error
     /// because multiple counters would have divergent cached values.
@@ -280,12 +292,7 @@ impl UninitializedSandbox {
 
         use hyperlight_common::layout::SCRATCH_TOP_GUEST_COUNTER_OFFSET;
 
-        if self
-            .mgr
-            .scratch_mem
-            .counter_taken
-            .swap(true, Ordering::Relaxed)
-        {
+        if self.counter_taken.swap(true, Ordering::Relaxed) {
             return Err(new_error!(
                 "GuestCounter has already been created for this sandbox"
             ));
@@ -301,7 +308,7 @@ impl UninitializedSandbox {
         }
 
         let offset = scratch_size - SCRATCH_TOP_GUEST_COUNTER_OFFSET as usize;
-        let deferred_hshm = self.mgr.scratch_mem.deferred_hshm.clone();
+        let deferred_hshm = self.deferred_hshm.clone();
 
         Ok(GuestCounter {
             inner: Mutex::new(GuestCounterInner {
@@ -370,6 +377,10 @@ impl UninitializedSandbox {
             rt_cfg,
             load_info: snapshot.load_info(),
             stack_top_gva: snapshot.stack_top_gva(),
+            #[cfg(feature = "nanvix-unstable")]
+            deferred_hshm: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "nanvix-unstable")]
+            counter_taken: std::sync::atomic::AtomicBool::new(false),
         };
 
         // If we were passed a writer for host print register it otherwise use the default.
@@ -448,6 +459,18 @@ impl UninitializedSandbox {
         print_func: impl Into<HostFunction<i32, (String,)>>,
     ) -> Result<()> {
         self.register("HostPrint", print_func)
+    }
+
+    /// Populate the deferred `HostSharedMemory` slot without running
+    /// the full `evolve()` pipeline. Used in tests where guest boot
+    /// is not available.
+    #[cfg(all(test, feature = "nanvix-unstable"))]
+    fn simulate_build(&self) {
+        let hshm = self.mgr.scratch_mem.as_host_shared_memory();
+        #[allow(clippy::unwrap_used)]
+        {
+            *self.deferred_hshm.lock().unwrap() = Some(hshm);
+        }
     }
 }
 // Check to see if the current version of Windows is supported
@@ -1500,7 +1523,7 @@ mod tests {
         fn increment_decrement() {
             let mut sandbox = make_sandbox();
             let counter = sandbox.guest_counter().unwrap();
-            sandbox.mgr.scratch_mem.simulate_build();
+            sandbox.simulate_build();
 
             counter.increment().unwrap();
             assert_eq!(counter.value().unwrap(), 1);
@@ -1514,7 +1537,7 @@ mod tests {
         fn underflow_returns_error() {
             let mut sandbox = make_sandbox();
             let counter = sandbox.guest_counter().unwrap();
-            sandbox.mgr.scratch_mem.simulate_build();
+            sandbox.simulate_build();
 
             assert_eq!(counter.value().unwrap(), 0);
             let result = counter.decrement();

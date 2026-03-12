@@ -38,6 +38,21 @@ use crate::{MultiUseSandbox, Result, UninitializedSandbox};
 #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
 pub(super) fn evolve_impl_multi_use(u_sbox: UninitializedSandbox) -> Result<MultiUseSandbox> {
     let (mut hshm, gshm) = u_sbox.mgr.build()?;
+
+    // Publish the HostSharedMemory for scratch so any pre-existing
+    // GuestCounter can begin issuing volatile writes.
+    #[cfg(feature = "nanvix-unstable")]
+    {
+        #[allow(clippy::unwrap_used)]
+        // The mutex can only be poisoned if a previous lock holder
+        // panicked.  Since we are the only writer at this point (the
+        // GuestCounter only reads inside `increment`/`decrement`),
+        // poisoning cannot happen.
+        {
+            *u_sbox.deferred_hshm.lock().unwrap() = Some(hshm.scratch_mem.clone());
+        }
+    }
+
     let mut vm = set_up_hypervisor_partition(
         gshm,
         &u_sbox.config,
